@@ -1,23 +1,20 @@
 """
 monitor.py — головний файл, запускається Task Scheduler кожну хвилину
 """
-import os
 import sys
 import logging
 from pathlib import Path
 from datetime import datetime
 
-# Додаємо поточну папку до шляху
 sys.path.insert(0, str(Path(__file__).parent))
 
-from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent / ".env")
+import config as _config_module
 
-# Логування
-log_level = os.getenv("LOG_LEVEL", "INFO")
+_cfg = _config_module.load()
+
 logging.basicConfig(
     filename=Path(__file__).parent / "monitor.log",
-    level=getattr(logging, log_level, logging.INFO),
+    level=getattr(logging, _cfg.get("LOG_LEVEL", "INFO"), logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -31,17 +28,7 @@ from collectors import disk, memory, services, backup
 
 
 def load_config() -> dict:
-    return {key: os.getenv(key, "") for key in [
-        "SERVER_ID", "COMPANY_NAME",
-        "TG_BOT_TOKEN", "TG_GROUP_ID", "TG_TOPIC_ID",
-        "OPENAI_API_KEY", "OPENAI_MODEL",
-        "DISK_PATHS", "DISK_WARNING_PERCENT", "DISK_CRITICAL_PERCENT",
-        "CPU_WARNING_PERCENT", "RAM_WARNING_PERCENT",
-        "BRUTE_FORCE_WINDOW_MIN", "BRUTE_FORCE_THRESHOLD", "KNOWN_IPS",
-        "BACKUP_PATH", "BACKUP_MAX_AGE_HOURS", "BACKUP_MIN_SIZE_MB",
-        "MONITOR_SERVICES", "WATCH_FILES",
-        "CHECK_INTERVAL_SEC", "ALERT_COOLDOWN_MIN",
-    ]}
+    return _config_module.load()
 
 
 def run():

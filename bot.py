@@ -2,15 +2,15 @@
 bot.py — Telegram бот з інтерактивними кнопками
 Запускається окремим процесом через Task Scheduler (--if-not-running)
 """
-import os
 import sys
 import logging
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent / ".env")
+import config as _config_module
+
+_cfg = _config_module.load()
 
 import requests
 import json
@@ -33,12 +33,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bot")
 
-BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
-GROUP_ID = os.getenv("TG_GROUP_ID", "")
-TOPIC_ID = os.getenv("TG_TOPIC_ID", "")
-SERVER_ID = os.getenv("SERVER_ID", "server")
-COMPANY = os.getenv("COMPANY_NAME", "Server")
-DISK_PATHS = [p.strip() for p in os.getenv("DISK_PATHS", "C:\\").split(",")]
+BOT_TOKEN  = _cfg["TG_BOT_TOKEN"]
+GROUP_ID   = _cfg["TG_GROUP_ID"]
+TOPIC_ID   = _cfg["TG_TOPIC_ID"]
+SERVER_ID  = _cfg["SERVER_ID"]
+COMPANY    = _cfg["COMPANY_NAME"]
+DISK_PATHS = [p.strip() for p in _cfg.get("DISK_PATHS", "C:\\").split(",")]
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -309,7 +309,7 @@ def process_callback(query: dict):
             session_id = parts[1]
             handle_kick(session_id, message_id)
     elif data.startswith("restart_service_"):
-        service = os.getenv("MONITOR_SERVICES", "").split(",")[0].strip()
+        service = _cfg.get("MONITOR_SERVICES", "").split(",")[0].strip()
         ok, msg = actions.restart_service(service)
         send(f"{'✅' if ok else '❌'} {msg}")
 
@@ -364,11 +364,7 @@ def run():
 
 
 def _config() -> dict:
-    return {key: os.getenv(key, "") for key in [
-        "SERVER_ID", "COMPANY_NAME", "TG_BOT_TOKEN", "TG_GROUP_ID", "TG_TOPIC_ID",
-        "OPENAI_API_KEY", "DISK_PATHS", "BACKUP_PATH", "BACKUP_MAX_AGE_HOURS",
-        "BACKUP_MIN_SIZE_MB", "MONITOR_SERVICES",
-    ]}
+    return _cfg
 
 
 if __name__ == "__main__":

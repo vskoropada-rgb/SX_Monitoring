@@ -1,10 +1,9 @@
 """
-collectors/backup.py — перевірка бекапів
+collectors/backup.py — перевірка ZIP-бекапів у вказаній папці
 """
 import os
 import glob
 from datetime import datetime, timedelta
-from pathlib import Path
 
 
 def collect(config: dict) -> dict:
@@ -19,12 +18,8 @@ def collect(config: dict) -> dict:
             "backup_path": backup_path,
         }
 
-    # Знаходимо всі файли бекапів
-    extensions = ["*.bak", "*.zip", "*.7z", "*.tar", "*.gz", "*.dt", "*.1cd"]
-    all_files = []
-    for ext in extensions:
-        all_files.extend(glob.glob(os.path.join(backup_path, "**", ext), recursive=True))
-        all_files.extend(glob.glob(os.path.join(backup_path, ext)))
+    # Шукаємо тільки ZIP-архіви безпосередньо в папці (без рекурсії)
+    all_files = glob.glob(os.path.join(backup_path, "*.zip"))
 
     if not all_files:
         return {

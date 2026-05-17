@@ -34,11 +34,10 @@ def get_service_status(service_name: str) -> str:
 
 
 def collect(config: dict) -> dict:
-    services_str = config.get(
-        "MONITOR_SERVICES",
-        "1C:Enterprise 8.3 Server Agent,MSSQLSERVER"
-    )
-    service_names = [s.strip() for s in services_str.split(",")]
+    services_str = config.get("MONITOR_SERVICES", "").strip()
+    if not services_str:
+        return {"services": [], "newly_stopped": [], "all_running": True}
+    service_names = [s.strip() for s in services_str.split(",") if s.strip()]
 
     results = []
     newly_stopped = []

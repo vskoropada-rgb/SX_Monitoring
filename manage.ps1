@@ -10,6 +10,11 @@ $EnvFile    = Join-Path $ScriptDir ".env"
 $EnvExample = Join-Path $ScriptDir ".env.example"
 $ReqFile    = Join-Path $ScriptDir "requirements.txt"
 
+$PY_VERSION     = "3.12.9"
+$PY_URL         = "https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-amd64.exe"
+$PY_MIN_MAJOR   = 3
+$PY_MIN_MINOR   = 10
+
 # ─── Admin check ─────────────────────────────────────────────
 
 $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -186,18 +191,158 @@ function Test-BackupFolder {
     return $true
 }
 
+# ─── 0. Prepare server ──────────────────────────────────────
+
+function Prepare-Server {
+    Show-Header "0. Підготовка сервера"
+
+    # Системна інформація
+    $os   = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $arch = if ([Environment]::Is64BitOperatingSystem) { "64-bit" } else { "32-bit" }
+    $ram  = if ($os) { "$([math]::Round($os.TotalVisibleMemorySize/1MB, 1)) GB" } else { "?" }
+
+    Write-Host "  Комп'ютер : $env:COMPUTERNAME" -ForegroundColor Cyan
+    Write-Host "  ОС        : $($os?.Caption) $arch" -ForegroundColor Cyan
+    Write-Host "  RAM       : $ram" -ForegroundColor Cyan
+    Write-Host "  PS версія : $($PSVersionTable.PSVersion)" -ForegroundColor Cyan
+    Write-Host ""
+
+    # ExecutionPolicy — потрібно для watchdog.ps1 та інших скриптів
+    $policy = Get-ExecutionPolicy -Scope LocalMachine -ErrorAction SilentlyContinue
+    if ($policy -in @("Restricted", "AllSigned", "Undefined")) {
+        Write-Info "ExecutionPolicy: $policy — встановлюю RemoteSigned"
+        try {
+            Set-ExecutionPolicy RemoteSigned -Scope LocalMachine -Force
+            Write-Ok "ExecutionPolicy = RemoteSigned"
+        } catch {
+            Write-Err "Не вдалося змінити ExecutionPolicy: $_"
+        }
+    } else {
+        Write-Ok "ExecutionPolicy: $policy"
+    }
+    Write-Host ""
+
+    # Python — перевірка
+    $pyOk = Test-PythonVersion
+    if (-not $pyOk) {
+        Write-Host ""
+        $ans = Read-Host "  Встановити Python $PY_VERSION автоматично? (Y/n)"
+        if ($ans -ne "n" -and $ans -ne "N") {
+            Install-Python
+            $pyOk = Test-PythonVersion
+        }
+    }
+
+    # pip upgrade
+    if ($pyOk) {
+        Write-Host ""
+        Write-Step "Оновлення pip..."
+        python -m pip install --upgrade pip --quiet 2>&1 | Out-Null
+        Write-Ok "pip оновлено до $(python -m pip --version 2>&1)"
+    }
+
+    Write-Host ""
+    if ($pyOk) {
+        Write-Ok "Сервер готовий. Перейдіть до пункту 1 (Встановити)."
+    } else {
+        Write-Err "Python не встановлений — пункт 1 не запрацює."
+    }
+    Pause-Return
+}
+
+function Test-PythonVersion {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $cmd) {
+        Write-Err "Python не знайдений у PATH"
+        return $false
+    }
+    $verStr = python --version 2>&1
+    if ($verStr -match "Python (\d+)\.(\d+)") {
+        $major = [int]$matches[1]; $minor = [int]$matches[2]
+        if ($major -gt $PY_MIN_MAJOR -or ($major -eq $PY_MIN_MAJOR -and $minor -ge $PY_MIN_MINOR)) {
+            Write-Ok "Python: $verStr  ($($cmd.Source))"
+            return $true
+        }
+        Write-Err "Python $major.$minor — застаріла версія, потрібно $PY_MIN_MAJOR.$PY_MIN_MINOR+"
+        return $false
+    }
+    Write-Err "Не вдалося визначити версію Python: $verStr"
+    return $false
+}
+
+function Install-Python {
+    Write-Host ""
+
+    # Спочатку пробуємо winget (Windows 10 1709+ / Server 2022)
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Step "Встановлення через winget (Python 3.12)..."
+        $result = winget install Python.Python.3.12 --silent `
+            --accept-source-agreements --accept-package-agreements 2>&1
+        Refresh-Path
+        if (Get-Command python -ErrorAction SilentlyContinue) {
+            Write-Ok "Python встановлено через winget"
+            return
+        }
+        Write-Info "winget не спрацював, завантажую напряму..."
+    }
+
+    # Пряме завантаження з python.org
+    $tmpExe = Join-Path $env:TEMP "python-$PY_VERSION-setup.exe"
+    Write-Step "Завантаження $PY_URL"
+    Write-Info "Розмір: ~25 MB, може зайняти кілька хвилин..."
+
+    try {
+        $ProgressPreference = "SilentlyContinue"
+        Invoke-WebRequest -Uri $PY_URL -OutFile $tmpExe -ErrorAction Stop
+        $ProgressPreference = "Continue"
+        $sizeMB = [math]::Round((Get-Item $tmpExe).Length / 1MB, 1)
+        Write-Ok "Завантажено ($sizeMB MB)"
+    } catch {
+        Write-Err "Помилка завантаження: $_"
+        Write-Host ""
+        Write-Host "  Завантажте вручну: $PY_URL" -ForegroundColor Yellow
+        Write-Host "  Встановіть з параметрами: /quiet InstallAllUsers=1 PrependPath=1" -ForegroundColor Yellow
+        return
+    }
+
+    Write-Step "Встановлення Python (тихий режим)..."
+    $proc = Start-Process $tmpExe `
+        -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0 Include_doc=0" `
+        -Wait -PassThru
+    Remove-Item $tmpExe -Force -ErrorAction SilentlyContinue
+
+    if ($proc.ExitCode -ne 0) {
+        Write-Err "Помилка встановлення (код виходу: $($proc.ExitCode))"
+        return
+    }
+
+    Refresh-Path
+
+    if (Get-Command python -ErrorAction SilentlyContinue) {
+        Write-Ok "Python встановлено: $(python --version 2>&1)"
+    } else {
+        Write-Info "Python встановлено, але PATH ще не оновлений."
+        Write-Info "Закрийте та перевідкрийте PowerShell, або перезавантажте сервер."
+    }
+}
+
+function Refresh-Path {
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+                [System.Environment]::GetEnvironmentVariable("Path","User")
+}
+
 # ─── 1. Install / Update ─────────────────────────────────────
 
 function Install-Monitor {
     Show-Header "1. Встановлення / Оновлення"
 
     Write-Step "Перевірка Python..."
-    $pyVer = python --version 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Err "Python не знайдений. Встановіть Python 3.10+ з python.org"
+    if (-not (Test-PythonVersion)) {
+        Write-Host ""
+        Write-Err "Python не готовий. Виконайте спочатку пункт 0 (Підготовка сервера)."
         Pause-Return; return
     }
-    Write-Ok $pyVer
 
     Write-Step "Встановлення залежностей pip..."
     python -m pip install -r $ReqFile --quiet
@@ -518,28 +663,31 @@ function Uninstall-Monitor {
 
 while ($true) {
     Show-Header "1С Monitor — Управління"
-    Write-Host "  1. Встановити / Оновити"                     -ForegroundColor White
+    Write-Host "  0. Підготовка сервера  (Python, ExecutionPolicy)" -ForegroundColor Yellow
+    Write-Host "  ───────────────────────────────────────────────"  -ForegroundColor DarkGray
+    Write-Host "  1. Встановити / Оновити"                          -ForegroundColor White
     Write-Host "  2. Налаштувати компанію  (назва / топік / бекапи)" -ForegroundColor White
-    Write-Host "  3. Переналаштувати Telegram  (токен / група)" -ForegroundColor White
-    Write-Host "  4. Переналаштувати OpenAI"                   -ForegroundColor White
-    Write-Host "  5. Переглянути налаштування"                 -ForegroundColor White
-    Write-Host "  6. Статус завдань"                           -ForegroundColor White
-    Write-Host "  7. Перезапустити моніторинг"                 -ForegroundColor White
-    Write-Host "  8. Видалити"                                 -ForegroundColor Red
-    Write-Host "  0. Вийти"                                    -ForegroundColor DarkGray
+    Write-Host "  3. Переналаштувати Telegram  (токен / група)"     -ForegroundColor White
+    Write-Host "  4. Переналаштувати OpenAI"                        -ForegroundColor White
+    Write-Host "  5. Переглянути налаштування"                      -ForegroundColor White
+    Write-Host "  6. Статус завдань"                                 -ForegroundColor White
+    Write-Host "  7. Перезапустити моніторинг"                      -ForegroundColor White
+    Write-Host "  8. Видалити"                                       -ForegroundColor Red
+    Write-Host "  Q. Вийти"                                         -ForegroundColor DarkGray
     Write-Host ""
 
     $choice = Read-Host "  Ваш вибір"
-    switch ($choice) {
-        "1" { Install-Monitor  }
-        "2" { Setup-Company    }
-        "3" { Setup-Telegram   }
-        "4" { Setup-OpenAI     }
-        "5" { Show-Config      }
-        "6" { Show-Status      }
-        "7" { Restart-Monitor  }
+    switch ($choice.ToUpper()) {
+        "0" { Prepare-Server    }
+        "1" { Install-Monitor   }
+        "2" { Setup-Company     }
+        "3" { Setup-Telegram    }
+        "4" { Setup-OpenAI      }
+        "5" { Show-Config       }
+        "6" { Show-Status       }
+        "7" { Restart-Monitor   }
         "8" { Uninstall-Monitor }
-        "0" { exit             }
+        "Q" { exit              }
         default {
             Write-Host "  Невірний вибір." -ForegroundColor Red
             Start-Sleep 1

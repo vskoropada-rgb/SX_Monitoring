@@ -3,7 +3,6 @@ monitor.py — головний файл, запускається Task Schedule
 """
 import sys
 import logging
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
 
@@ -11,23 +10,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import config as _config_module
 
-_cfg = _config_module.load()
-
-# Ротація логів: 5 MB × 3 файли = макс 15 MB
-_log_handler = RotatingFileHandler(
-    Path(__file__).parent / "monitor.log",
-    maxBytes=5 * 1024 * 1024,
-    backupCount=3,
-    encoding="utf-8",
-)
-_log_handler.setFormatter(logging.Formatter(
-    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-))
-logging.basicConfig(
-    level=getattr(logging, _cfg.get("LOG_LEVEL", "INFO"), logging.INFO),
-    handlers=[_log_handler],
-)
 logger = logging.getLogger("monitor")
 
 import storage
@@ -44,8 +26,6 @@ def load_config() -> dict:
 def run():
     logger.info("=== Запуск перевірки ===")
     config = load_config()
-
-    storage.init_db()
 
     # Режим обслуговування — метрики збираємо, але алерти не надсилаємо
     server_id   = config.get("SERVER_ID", "server")

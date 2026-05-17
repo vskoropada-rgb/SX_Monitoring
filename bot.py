@@ -1,6 +1,5 @@
 """
 bot.py — Telegram бот з інтерактивними кнопками
-Запускається окремим процесом через Task Scheduler (--if-not-running)
 """
 import sys
 import logging
@@ -26,12 +25,6 @@ from collectors import disk as disk_collector
 from collectors import memory as mem_collector
 from collectors import services as svc_collector
 
-from logging.handlers import RotatingFileHandler as _RFH
-
-_log_h = _RFH(Path(__file__).parent / "bot.log",
-               maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
-_log_h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s]: %(message)s"))
-logging.basicConfig(level=logging.INFO, handlers=[_log_h])
 logger = logging.getLogger("bot")
 
 BOT_TOKEN  = _cfg["TG_BOT_TOKEN"]

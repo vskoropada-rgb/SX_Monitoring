@@ -362,18 +362,18 @@ function Install-Monitor {
 
     Create-Tasks
 
-    Write-Step "Запуск Telegram бота..."
+    Write-Step "Запуск моніторингу..."
     $python = (Get-Command python -ErrorAction SilentlyContinue)?.Source
     if ($python) {
-        Start-Process $python -ArgumentList "`"$ScriptDir\bot.py`"" -WindowStyle Hidden
-        Write-Ok "Бот запущений"
+        Start-Process $python -ArgumentList "`"$ScriptDir\main.py`"" -WindowStyle Hidden
+        Write-Ok "Моніторинг запущений"
     }
 
     Write-Host ""
     Write-Ok "Встановлення завершено!"
     Write-Host "  Task Scheduler завдання:" -ForegroundColor Cyan
-    Write-Host "    1C_Monitor      — кожну хвилину"
-    Write-Host "    1C_Monitor_Bot  — при старті системи"
+    Write-Host "    1C_Monitor          — при старті системи (main.py)"
+    Write-Host "    1C_Monitor_Watchdog — кожні 5 хвилин"
     Pause-Return
 }
 
@@ -398,36 +398,31 @@ function Create-Tasks {
     }
 
     $python    = (Get-Command python).Source
-    $settings  = New-ScheduledTaskSettingsSet `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
-        -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
 
-    $a1 = New-ScheduledTaskAction -Execute $python -Argument "`"$ScriptDir\monitor.py`""
-    $t1 = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 1) `
-                                   -Once -At (Get-Date)
+    # main.py — моніторинг + бот в одному процесі, запуск при старті системи
+    $settingsMain = New-ScheduledTaskSettingsSet `
+        -ExecutionTimeLimit (New-TimeSpan -Days 0) `
+        -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1)
+    $aMain = New-ScheduledTaskAction -Execute $python -Argument "`"$ScriptDir\main.py`""
+    $tMain = New-ScheduledTaskTrigger -AtStartup
     try {
-        Register-ScheduledTask -TaskName "1C_Monitor" -Action $a1 -Trigger $t1 `
-            -Settings $settings -Principal $principal -Force | Out-Null
-        Write-Ok "1C_Monitor створено (кожну хвилину)"
+        Register-ScheduledTask -TaskName "1C_Monitor" -Action $aMain -Trigger $tMain `
+            -Settings $settingsMain -Principal $principal -Force | Out-Null
+        Write-Ok "1C_Monitor створено (при старті, main.py)"
     } catch { Write-Err "Помилка 1C_Monitor: $_" }
 
-    $a2 = New-ScheduledTaskAction -Execute $python -Argument "`"$ScriptDir\bot.py`""
-    $t2 = New-ScheduledTaskTrigger -AtStartup
-    try {
-        Register-ScheduledTask -TaskName "1C_Monitor_Bot" -Action $a2 -Trigger $t2 `
-            -Settings $settings -Principal $principal -Force | Out-Null
-        Write-Ok "1C_Monitor_Bot створено (при старті)"
-    } catch { Write-Err "Помилка 1C_Monitor_Bot: $_" }
-
-    # Watchdog — кожні 5 хвилин, перезапускає бота якщо впав
-    $a3 = New-ScheduledTaskAction -Execute "powershell" `
+    # Watchdog — кожні 5 хвилин, перезапускає main.py якщо впав
+    $settingsWd = New-ScheduledTaskSettingsSet `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
+        -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    $aWd = New-ScheduledTaskAction -Execute "powershell" `
         -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptDir\watchdog.ps1`""
-    $t3 = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 5) `
-                                   -Once -At (Get-Date)
+    $tWd = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 5) `
+                                    -Once -At (Get-Date)
     try {
-        Register-ScheduledTask -TaskName "1C_Monitor_Watchdog" -Action $a3 -Trigger $t3 `
-            -Settings $settings -Principal $principal -Force | Out-Null
+        Register-ScheduledTask -TaskName "1C_Monitor_Watchdog" -Action $aWd -Trigger $tWd `
+            -Settings $settingsWd -Principal $principal -Force | Out-Null
         Write-Ok "1C_Monitor_Watchdog створено (кожні 5 хвилин)"
     } catch { Write-Err "Помилка 1C_Monitor_Watchdog: $_" }
 }
@@ -574,7 +569,7 @@ function Show-Config {
 function Show-Status {
     Show-Header "6. Статус завдань"
 
-    foreach ($name in @("1C_Monitor", "1C_Monitor_Bot", "1C_Monitor_Watchdog")) {
+    foreach ($name in @("1C_Monitor", "1C_Monitor_Watchdog")) {
         $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if (-not $task) {
             Write-Host "  $name [НЕ ВСТАНОВЛЕНО]" -ForegroundColor DarkGray
@@ -600,13 +595,13 @@ function Show-Status {
 function Restart-Monitor {
     Show-Header "7. Перезапуск моніторингу"
 
-    Write-Step "Зупинка Python процесів бота..."
+    Write-Step "Зупинка процесу моніторингу..."
     Get-CimInstance Win32_Process |
-        Where-Object { $_.CommandLine -match "bot\.py" } |
+        Where-Object { $_.CommandLine -match "main\.py" } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Write-Ok "Процеси зупинені"
 
-    foreach ($name in @("1C_Monitor", "1C_Monitor_Bot", "1C_Monitor_Watchdog")) {
+    foreach ($name in @("1C_Monitor", "1C_Monitor_Watchdog")) {
         try {
             Stop-ScheduledTask  -TaskName $name -ErrorAction SilentlyContinue
             Start-ScheduledTask -TaskName $name
@@ -634,7 +629,7 @@ function Uninstall-Monitor {
 
     Write-Step "Зупинка Python процесів..."
     Get-CimInstance Win32_Process |
-        Where-Object { $_.CommandLine -match "monitor\.py|bot\.py" } |
+        Where-Object { $_.CommandLine -match "main\.py" } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Write-Ok "Python процеси зупинені"
 

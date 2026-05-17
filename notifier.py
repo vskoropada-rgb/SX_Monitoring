@@ -150,6 +150,54 @@ def _send_message(bot_token: str, group_id: str, topic_id: str, text: str, keybo
         return False
 
 
+def send_daily_report(metrics: dict, config: dict) -> bool:
+    """Щоденний звіт о заданій годині"""
+    company = config.get("COMPANY_NAME", config.get("SERVER_ID", "Server"))
+    now     = datetime.now()
+
+    disk_lines = []
+    for d in metrics.get("disks", []):
+        if "free_pct" in d:
+            icon = "🔴" if d["free_pct"] < 10 else "⚠️" if d["free_pct"] < 20 else "✅"
+            disk_lines.append(f"  {icon} {d['path']}: {d['free_pct']}% ({d['free_gb']} GB)")
+
+    cpu = metrics.get("cpu", {}).get("percent", "?")
+    ram = metrics.get("ram", {}).get("percent", "?")
+
+    b_icon = "✅" if metrics.get("status") == "ok" else "⚠️"
+    b_line = (
+        f"{b_icon} {metrics.get('latest_file', 'н/д')}  "
+        f"{metrics.get('latest_size_mb', '?')} MB  "
+        f"{metrics.get('latest_age_hours', '?')}г тому"
+    )
+    if metrics.get("schedule_info"):
+        b_line += f"  (розклад {metrics['schedule_info']})"
+
+    reboot_line = (
+        "⚠️ Очікує перезавантаження!" if metrics.get("reboot_required")
+        else "✅ Перезавантаження не потрібне"
+    )
+
+    lines = [
+        f"📊 <b>Щоденний звіт — {company}</b>",
+        f"📅 {now.strftime('%d.%m.%Y %H:%M')}",
+        "",
+        "💾 <b>Диски:</b>",
+        *disk_lines,
+        "",
+        f"🖥 CPU: <b>{cpu}%</b>  |  RAM: <b>{ram}%</b>",
+        "",
+        f"📦 <b>Бекап:</b>  {b_line}",
+        "",
+        f"🔄 {reboot_line}",
+    ]
+
+    if metrics.get("issues"):
+        lines += ["", "⚠️ <b>Проблеми:</b>"] + [f"  • {i}" for i in metrics["issues"]]
+
+    return send_message("\n".join(lines), config)
+
+
 def send_photo(image_path: str, caption: str, config: dict) -> bool:
     """Відправляє зображення (графік)"""
     bot_token = config.get("TG_BOT_TOKEN")

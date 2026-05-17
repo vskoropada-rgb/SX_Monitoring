@@ -26,11 +26,12 @@ from collectors import disk as disk_collector
 from collectors import memory as mem_collector
 from collectors import services as svc_collector
 
-logging.basicConfig(
-    filename=Path(__file__).parent / "bot.log",
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s]: %(message)s",
-)
+from logging.handlers import RotatingFileHandler as _RFH
+
+_log_h = _RFH(Path(__file__).parent / "bot.log",
+               maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+_log_h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s]: %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_log_h])
 logger = logging.getLogger("bot")
 
 BOT_TOKEN  = _cfg["TG_BOT_TOKEN"]
@@ -86,45 +87,57 @@ def send_photo(image_path: str, caption: str):
 # ─── Обробники команд ────────────────────────────────────────
 
 def handle_status(message_id=None):
-    config = _config()
+    config   = _config()
     disk_data = disk_collector.collect(config)
-    mem_data = mem_collector.collect(config)
-    svc_data = svc_collector.collect(config)
+    mem_data  = mem_collector.collect(config)
+    svc_data  = svc_collector.collect(config)
 
-    lines = [f"📡 <b>Статус — {COMPANY}</b>", f"🕐 {datetime.now().strftime('%H:%M %d.%m.%Y')}", ""]
+    maint_until = storage.get_maintenance_until(SERVER_ID)
+    maint_badge = f"\n🔧 <b>Обслуговування до {maint_until.strftime('%H:%M')})</b>" if maint_until else ""
 
-    # Диски
+    lines = [
+        f"📡 <b>Статус — {COMPANY}</b>{maint_badge}",
+        f"🕐 {datetime.now().strftime('%H:%M %d.%m.%Y')}",
+        "",
+    ]
+
     for d in disk_data.get("disks", []):
         if "free_pct" in d:
             icon = "🔴" if d["free_pct"] < 10 else "⚠️" if d["free_pct"] < 20 else "✅"
             lines.append(f"{icon} Диск {d['path']}: {d['free_pct']}% вільно ({d['free_gb']}GB)")
 
-    # CPU/RAM
     cpu = mem_data.get("cpu", {})
     ram = mem_data.get("ram", {})
-    cpu_icon = "🔴" if cpu.get("percent", 0) > 85 else "✅"
-    ram_icon = "🔴" if ram.get("percent", 0) > 90 else "✅"
-    lines.append(f"{cpu_icon} CPU: {cpu.get('percent', '?')}%")
-    lines.append(f"{ram_icon} RAM: {ram.get('percent', '?')}% (вільно {ram.get('free_gb', '?')}GB)")
+    lines.append(f"{'🔴' if cpu.get('percent',0)>85 else '✅'} CPU: {cpu.get('percent','?')}%")
+    lines.append(f"{'🔴' if ram.get('percent',0)>90 else '✅'} RAM: {ram.get('percent','?')}% (вільно {ram.get('free_gb','?')}GB)")
 
-    # Сервіси
     lines.append("")
     for svc in svc_data.get("services", []):
         icon = "✅" if svc["is_running"] else "❌"
         lines.append(f"{icon} {svc['name']}")
 
+    maint_btn = (
+        {"text": "✅ Зняти обслуговування", "callback_data": f"maint_off_{SERVER_ID}"}
+        if maint_until else
+        {"text": "🔧 Обслуговування 2г",   "callback_data": f"maint_on_{SERVER_ID}"}
+    )
+
     keyboard = [
         [
-            {"text": "👥 Сесії", "callback_data": f"sessions_{SERVER_ID}"},
-            {"text": "💾 Диски", "callback_data": f"disk_{SERVER_ID}"},
+            {"text": "👥 Сесії",      "callback_data": f"sessions_{SERVER_ID}"},
+            {"text": "💾 Диски",      "callback_data": f"disk_{SERVER_ID}"},
         ],
         [
-            {"text": "📊 Графік 1г", "callback_data": f"chart_1_{SERVER_ID}"},
+            {"text": "📊 Графік 1г",  "callback_data": f"chart_1_{SERVER_ID}"},
             {"text": "📊 Графік 24г", "callback_data": f"chart_24_{SERVER_ID}"},
         ],
         [
-            {"text": "📦 Бекапи", "callback_data": f"backups_{SERVER_ID}"},
+            {"text": "📦 Бекапи",      "callback_data": f"backups_{SERVER_ID}"},
+            {"text": "📈 Тренд бекапів","callback_data": f"chart_backup_{SERVER_ID}"},
+        ],
+        [
             {"text": "🔄 Перезавантажити", "callback_data": f"reboot_confirm_{SERVER_ID}"},
+            maint_btn,
         ],
     ]
 
@@ -258,6 +271,20 @@ def handle_reboot(message_id=None):
     send(text, keyboard, message_id)
 
 
+def handle_backup_chart(message_id=None):
+    send("⏳ Генерую графік тренду бекапів...")
+    path = charts.generate_backup_chart(days=30)
+    if path:
+        send_photo(path, f"📈 <b>{COMPANY}</b> — Розмір бекапів за 30 днів")
+        try:
+            import os
+            os.unlink(path)
+        except Exception:
+            pass
+    else:
+        send("❌ Недостатньо даних для графіку (потрібно 2+ бекапи)")
+
+
 def handle_kick(session_id: str, message_id=None):
     ok, msg = actions.kick_session(session_id)
     icon = "✅" if ok else "❌"
@@ -297,6 +324,18 @@ def process_callback(query: dict):
         handle_chart(24, "combined", message_id)
     elif data.startswith("chart_disk_"):
         handle_chart(24, "disk", message_id)
+    elif data.startswith("chart_backup_"):
+        handle_backup_chart(message_id)
+    elif data.startswith("maint_on_"):
+        from datetime import timedelta
+        until = datetime.now() + timedelta(hours=2)
+        storage.set_maintenance(SERVER_ID, until)
+        send(f"🔧 Режим обслуговування увімкнено до {until.strftime('%H:%M')}")
+        handle_status(message_id)
+    elif data.startswith("maint_off_"):
+        storage.clear_maintenance(SERVER_ID)
+        send("✅ Режим обслуговування знято")
+        handle_status(message_id)
     elif data.startswith("reboot_confirm_"):
         handle_reboot_confirm(message_id)
     elif data.startswith("reboot_do_"):
@@ -331,6 +370,21 @@ def process_message(message: dict):
         handle_backups()
     elif text.startswith("/chart"):
         handle_chart(24)
+    elif text.startswith("/maintenance"):
+        # /maintenance 2h  або  /maintenance off
+        parts = text.split()
+        arg = parts[1].lower() if len(parts) > 1 else ""
+        if arg == "off":
+            storage.clear_maintenance(SERVER_ID)
+            send("✅ Режим обслуговування знято")
+        else:
+            hours = 2
+            if arg.endswith("h") and arg[:-1].isdigit():
+                hours = max(1, min(24, int(arg[:-1])))
+            from datetime import timedelta
+            until = datetime.now() + timedelta(hours=hours)
+            storage.set_maintenance(SERVER_ID, until)
+            send(f"🔧 Обслуговування увімкнено на {hours}г (до {until.strftime('%H:%M')})")
 
 
 # ─── Long polling ────────────────────────────────────────────

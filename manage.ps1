@@ -248,7 +248,7 @@ function Setup-FirstRun {
 function Create-Tasks {
     Write-Step "Створення Task Scheduler завдань..."
 
-    foreach ($t in @("1C_Monitor", "1C_Monitor_Bot")) {
+    foreach ($t in @("1C_Monitor", "1C_Monitor_Bot", "1C_Monitor_Watchdog")) {
         Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction SilentlyContinue
     }
 
@@ -274,6 +274,17 @@ function Create-Tasks {
             -Settings $settings -Principal $principal -Force | Out-Null
         Write-Ok "1C_Monitor_Bot створено (при старті)"
     } catch { Write-Err "Помилка 1C_Monitor_Bot: $_" }
+
+    # Watchdog — кожні 5 хвилин, перезапускає бота якщо впав
+    $a3 = New-ScheduledTaskAction -Execute "powershell" `
+        -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptDir\watchdog.ps1`""
+    $t3 = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 5) `
+                                   -Once -At (Get-Date)
+    try {
+        Register-ScheduledTask -TaskName "1C_Monitor_Watchdog" -Action $a3 -Trigger $t3 `
+            -Settings $settings -Principal $principal -Force | Out-Null
+        Write-Ok "1C_Monitor_Watchdog створено (кожні 5 хвилин)"
+    } catch { Write-Err "Помилка 1C_Monitor_Watchdog: $_" }
 }
 
 # ─── 2. Setup company ────────────────────────────────────────
@@ -418,7 +429,7 @@ function Show-Config {
 function Show-Status {
     Show-Header "6. Статус завдань"
 
-    foreach ($name in @("1C_Monitor", "1C_Monitor_Bot")) {
+    foreach ($name in @("1C_Monitor", "1C_Monitor_Bot", "1C_Monitor_Watchdog")) {
         $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if (-not $task) {
             Write-Host "  $name [НЕ ВСТАНОВЛЕНО]" -ForegroundColor DarkGray
@@ -450,7 +461,7 @@ function Restart-Monitor {
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Write-Ok "Процеси зупинені"
 
-    foreach ($name in @("1C_Monitor", "1C_Monitor_Bot")) {
+    foreach ($name in @("1C_Monitor", "1C_Monitor_Bot", "1C_Monitor_Watchdog")) {
         try {
             Stop-ScheduledTask  -TaskName $name -ErrorAction SilentlyContinue
             Start-ScheduledTask -TaskName $name
@@ -470,7 +481,7 @@ function Uninstall-Monitor {
     $confirm = Read-Host "  Введіть 'ТАК' для підтвердження"
     if ($confirm -cne "ТАК") { Write-Info "Скасовано."; Pause-Return; return }
 
-    foreach ($name in @("1C_Monitor", "1C_Monitor_Bot")) {
+    foreach ($name in @("1C_Monitor", "1C_Monitor_Bot", "1C_Monitor_Watchdog")) {
         Stop-ScheduledTask       -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
         Write-Ok "Завдання $name видалено"

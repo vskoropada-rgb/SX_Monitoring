@@ -4,7 +4,7 @@ charts.py — генерація графіків через matplotlib
 import os
 import tempfile
 from datetime import datetime
-from storage import get_metrics_history
+from storage import get_metrics_history, get_backup_history
 
 
 def generate_chart(metric_name: str, hours: int = 24, title: str = None) -> str | None:
@@ -134,4 +134,49 @@ def generate_combined_chart(server_id: str, hours: int = 24) -> str | None:
         return tmp.name
 
     except Exception as e:
+        return None
+
+
+def generate_backup_chart(days: int = 30) -> str | None:
+    """Графік розміру ZIP-бекапів за N днів"""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+        from datetime import datetime as dt
+
+        history = get_backup_history(days=days)
+        if len(history) < 2:
+            return None
+
+        times = [dt.fromisoformat(r["detected_at"]) for r in history]
+        sizes = [r["size_bytes"] / (1024 * 1024) for r in history]
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        fig.patch.set_facecolor("#1e1e2e")
+        ax.set_facecolor("#1e1e2e")
+
+        color = "#89dceb"
+        ax.bar(times, sizes, color=color, alpha=0.6, width=0.6)
+        ax.plot(times, sizes, color=color, linewidth=1.5, marker="o", markersize=4)
+
+        ax.set_title(f"Розмір ZIP-бекапів за {days} днів", color="#cdd6f4", fontsize=11, pad=10)
+        ax.set_xlabel("Дата", color="#cdd6f4", fontsize=9)
+        ax.set_ylabel("МБ", color="#cdd6f4", fontsize=9)
+        ax.tick_params(colors="#6c7086", labelsize=8)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+
+        for spine in ax.spines.values():
+            spine.set_color("#313244")
+        ax.grid(True, color="#313244", alpha=0.5, linestyle="--", axis="y")
+
+        plt.tight_layout()
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        plt.savefig(tmp.name, dpi=120, bbox_inches="tight", facecolor=fig.get_facecolor())
+        plt.close(fig)
+        return tmp.name
+
+    except Exception:
         return None

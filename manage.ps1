@@ -5,17 +5,15 @@
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "SilentlyContinue"
 
-$ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
-$EnvFile     = Join-Path $ScriptDir ".env"
-$EnvExample  = Join-Path $ScriptDir ".env.example"
-$ReqFile     = Join-Path $ScriptDir "requirements.txt"
+$ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
+$EnvFile    = Join-Path $ScriptDir ".env"
+$EnvExample = Join-Path $ScriptDir ".env.example"
+$ReqFile    = Join-Path $ScriptDir "requirements.txt"
 
 # ─── Admin check ─────────────────────────────────────────────
 
 $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-$isAdmin   = $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
-
-if (-not $isAdmin) {
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
     Write-Host ""
     Write-Host "  ПОМИЛКА: Запустіть PowerShell від імені Адміністратора!" -ForegroundColor Red
     Write-Host ""
@@ -23,7 +21,7 @@ if (-not $isAdmin) {
     exit 1
 }
 
-# ─── DPAPI encryption ────────────────────────────────────────
+# ─── DPAPI ───────────────────────────────────────────────────
 
 function Protect-Value {
     param([string]$Plaintext)
@@ -34,6 +32,22 @@ function Protect-Value {
         [System.Security.Cryptography.DataProtectionScope]::LocalMachine
     )
     return "ENCRYPTED:" + [Convert]::ToBase64String($encrypted)
+}
+
+function Unprotect-Value {
+    param([string]$Value)
+    if (-not $Value -or -not $Value.StartsWith("ENCRYPTED:")) { return $Value }
+    try {
+        Add-Type -AssemblyName System.Security
+        $bytes     = [Convert]::FromBase64String($Value.Substring(10))
+        $decrypted = [System.Security.Cryptography.ProtectedData]::Unprotect(
+            $bytes, $null,
+            [System.Security.Cryptography.DataProtectionScope]::LocalMachine
+        )
+        return [System.Text.Encoding]::UTF8.GetString($decrypted)
+    } catch {
+        return ""
+    }
 }
 
 # ─── .env helpers ────────────────────────────────────────────
@@ -51,9 +65,7 @@ function Read-Env {
 
 function Set-EnvValue {
     param([string]$Key, [string]$Value)
-    if (-not (Test-Path $EnvFile)) {
-        Copy-Item $EnvExample $EnvFile
-    }
+    if (-not (Test-Path $EnvFile)) { Copy-Item $EnvExample $EnvFile }
     $lines = Get-Content $EnvFile -Encoding UTF8
     $found = $false
     $newLines = $lines | ForEach-Object {
@@ -69,8 +81,8 @@ function Set-EnvValue {
 function Get-DisplayValue {
     param([string]$Key, [hashtable]$Env)
     $val = $Env[$Key]
-    if (-not $val)                  { return "[не задано]" }
-    if ($val.StartsWith("ENCRYPTED:")) { return "[зашифровано]" }
+    if (-not $val)                       { return "[не задано]"   }
+    if ($val.StartsWith("ENCRYPTED:"))   { return "[зашифровано]" }
     return $val
 }
 
@@ -103,12 +115,82 @@ function Read-Secret {
 
 function Pause-Return { Read-Host "`n  Натисніть Enter для повернення в меню" | Out-Null }
 
+# ─── Telegram API ────────────────────────────────────────────
+
+function New-TelegramTopic {
+    param([string]$TopicName)
+
+    $env     = Read-Env
+    $token   = Unprotect-Value $env["TG_BOT_TOKEN"]
+    $groupId = Unprotect-Value $env["TG_GROUP_ID"]
+
+    if (-not $token -or -not $groupId) {
+        Write-Err "Telegram не налаштований. Спочатку виконайте пункт 3."
+        return $null
+    }
+
+    Write-Step "Створення топіку '$TopicName' в Telegram..."
+    try {
+        $body = @{ chat_id = $groupId; name = $TopicName } | ConvertTo-Json -Compress
+        $resp = Invoke-RestMethod `
+            -Uri "https://api.telegram.org/bot$token/createForumTopic" `
+            -Method Post -Body $body -ContentType "application/json; charset=utf-8" `
+            -ErrorAction Stop
+        if ($resp.ok) {
+            $id = $resp.result.message_thread_id
+            Write-Ok "Топік створено! ID: $id"
+            return $id
+        } else {
+            Write-Err "Telegram API: $($resp.description)"
+            return $null
+        }
+    } catch {
+        Write-Err "Помилка запиту: $_"
+        return $null
+    }
+}
+
+# ─── Backup validation ───────────────────────────────────────
+
+function Test-BackupFolder {
+    param([string]$Path)
+
+    if (-not $Path -or -not (Test-Path $Path)) {
+        Write-Err  "Папка не існує: $Path"
+        return $false
+    }
+
+    $zips = Get-ChildItem $Path -Filter "*.zip" -File -ErrorAction SilentlyContinue
+    if (-not $zips) {
+        Write-Info "ZIP-файлів не знайдено (можливо бекап ще не запускався)"
+        return $true
+    }
+
+    # Відфільтровуємо порожні/пошкоджені (< 1 KB)
+    $valid = $zips | Where-Object { $_.Length -gt 1024 }
+    $tiny  = $zips | Where-Object { $_.Length -le 1024 }
+
+    if ($tiny) {
+        Write-Err "Знайдено $($tiny.Count) файл(ів) менше 1 KB — можливо пошкоджені:"
+        $tiny | ForEach-Object { Write-Host "    $_  ($($_.Length) байт)" -ForegroundColor Red }
+    }
+
+    if ($valid) {
+        $latest = $valid | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $sizeMB = [math]::Round($latest.Length / 1MB, 1)
+        $age    = [math]::Round(((Get-Date) - $latest.LastWriteTime).TotalHours, 1)
+        Write-Ok "Останній бекап: $($latest.Name)  ($sizeMB MB, ${age}г тому)"
+        Write-Ok "Всього валідних ZIP: $($valid.Count)"
+    }
+
+    return $true
+}
+
 # ─── 1. Install / Update ─────────────────────────────────────
 
 function Install-Monitor {
     Show-Header "1. Встановлення / Оновлення"
 
-    # Python check
     Write-Step "Перевірка Python..."
     $pyVer = python --version 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -117,7 +199,6 @@ function Install-Monitor {
     }
     Write-Ok $pyVer
 
-    # Dependencies
     Write-Step "Встановлення залежностей pip..."
     python -m pip install -r $ReqFile --quiet
     if ($LASTEXITCODE -ne 0) {
@@ -126,19 +207,16 @@ function Install-Monitor {
     }
     Write-Ok "Залежності встановлені"
 
-    # First-time .env setup
     if (-not (Test-Path $EnvFile)) {
-        Write-Info "Файл .env не знайдений. Запускаю першочергове налаштування..."
+        Write-Info "Файл .env не знайдений — запускаю першочергове налаштування..."
         Write-Host ""
         Setup-FirstRun
     } else {
         Write-Ok "Файл .env знайдений"
     }
 
-    # Task Scheduler
     Create-Tasks
 
-    # Start bot immediately
     Write-Step "Запуск Telegram бота..."
     $python = (Get-Command python -ErrorAction SilentlyContinue)?.Source
     if ($python) {
@@ -155,17 +233,16 @@ function Install-Monitor {
 }
 
 function Setup-FirstRun {
-    Write-Host "  ── Ідентифікація сервера ──" -ForegroundColor Cyan
-    $sid  = Read-Host "  SERVER_ID (напр. company_a)"
-    $name = Read-Host "  COMPANY_NAME (напр. Компанія А)"
-    Set-EnvValue "SERVER_ID"    $sid
-    Set-EnvValue "COMPANY_NAME" $name
+    Write-Host "  ── Крок 1: Telegram ──" -ForegroundColor Cyan
+    Setup-Telegram-Credentials
 
     Write-Host ""
-    Setup-Telegram-Full
+    Write-Host "  ── Крок 2: Компанія ──" -ForegroundColor Cyan
+    Setup-Company-Details
 
     Write-Host ""
-    Setup-OpenAI
+    Write-Host "  ── Крок 3: OpenAI ──" -ForegroundColor Cyan
+    Setup-OpenAI-Credentials
 }
 
 function Create-Tasks {
@@ -175,13 +252,12 @@ function Create-Tasks {
         Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction SilentlyContinue
     }
 
-    $python   = (Get-Command python).Source
-    $settings = New-ScheduledTaskSettingsSet `
+    $python    = (Get-Command python).Source
+    $settings  = New-ScheduledTaskSettingsSet `
         -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
         -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
 
-    # Monitor — every minute
     $a1 = New-ScheduledTaskAction -Execute $python -Argument "`"$ScriptDir\monitor.py`""
     $t1 = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 1) `
                                    -Once -At (Get-Date)
@@ -191,7 +267,6 @@ function Create-Tasks {
         Write-Ok "1C_Monitor створено (кожну хвилину)"
     } catch { Write-Err "Помилка 1C_Monitor: $_" }
 
-    # Bot — at startup
     $a2 = New-ScheduledTaskAction -Execute $python -Argument "`"$ScriptDir\bot.py`""
     $t2 = New-ScheduledTaskTrigger -AtStartup
     try {
@@ -201,65 +276,96 @@ function Create-Tasks {
     } catch { Write-Err "Помилка 1C_Monitor_Bot: $_" }
 }
 
-# ─── 2. Change TG topic ──────────────────────────────────────
+# ─── 2. Setup company ────────────────────────────────────────
 
-function Setup-Topic {
-    Show-Header "2. Змінити Telegram топік"
-    $env = Read-Env
-    Write-Host "  Поточний топік : $(Get-DisplayValue 'TG_TOPIC_ID' $env)" -ForegroundColor White
-    Write-Host ""
-    $topicId = Read-Host "  Новий TG_TOPIC_ID"
-    if ($topicId) {
-        Set-EnvValue "TG_TOPIC_ID" $topicId
-        Write-Ok "Топік змінено на: $topicId"
-        Write-Info "Перезапустіть бота (пункт 7) для застосування змін"
-    } else {
-        Write-Info "Скасовано — значення не змінено"
-    }
+function Setup-Company {
+    Show-Header "2. Налаштування компанії"
+    Setup-Company-Details
+    Write-Info "Перезапустіть моніторинг (пункт 7) для застосування змін"
     Pause-Return
 }
 
-# ─── 3. Reconfigure Telegram ─────────────────────────────────
+function Setup-Company-Details {
+    $env = Read-Env
 
-function Setup-Telegram-Full {
-    Write-Host "  ── Telegram налаштування ──" -ForegroundColor Cyan
-    $token   = Read-Secret "TG_BOT_TOKEN"
-    $groupId = Read-Secret "TG_GROUP_ID"
-    $topicId = Read-Host  "  TG_TOPIC_ID"
+    Write-Host "  Поточна назва : $(Get-DisplayValue 'COMPANY_NAME' $env)" -ForegroundColor DarkGray
+    Write-Host "  Поточний ID   : $(Get-DisplayValue 'SERVER_ID' $env)"    -ForegroundColor DarkGray
+    Write-Host ""
 
-    Set-EnvValue "TG_BOT_TOKEN" (Protect-Value $token)
-    Set-EnvValue "TG_GROUP_ID"  (Protect-Value $groupId)
-    Set-EnvValue "TG_TOPIC_ID"  $topicId
+    $name = Read-Host "  Назва компанії (напр. Компанія А)"
+    $sid  = Read-Host "  SERVER_ID — латиниця без пробілів (напр. company_a)"
 
-    Write-Ok "Telegram збережено (токен та група — зашифровані)"
+    if ($name) { Set-EnvValue "COMPANY_NAME" $name }
+    if ($sid)  { Set-EnvValue "SERVER_ID"    $sid  }
+
+    # Автоматично створити топік в Telegram
+    Write-Host ""
+    $displayName = if ($name) { $name } else { (Get-DisplayValue "COMPANY_NAME" $env) }
+    $topicId = New-TelegramTopic $displayName
+
+    if ($topicId) {
+        Set-EnvValue "TG_TOPIC_ID" $topicId
+    } else {
+        Write-Info "Не вдалося створити топік автоматично."
+        $manual = Read-Host "  Введіть TG_TOPIC_ID вручну (або Enter щоб пропустити)"
+        if ($manual) { Set-EnvValue "TG_TOPIC_ID" $manual }
+    }
+
+    # Папка бекапів
+    Write-Host ""
+    Write-Host "  ── Папка бекапів ──" -ForegroundColor Cyan
+    Write-Host "  Поточна: $(Get-DisplayValue 'BACKUP_PATH' $env)" -ForegroundColor DarkGray
+    Write-Host ""
+    $backupPath = Read-Host "  Повний шлях до папки з ZIP-бекапами"
+
+    if ($backupPath) {
+        Set-EnvValue "BACKUP_PATH" $backupPath
+        Write-Host ""
+        Test-BackupFolder $backupPath | Out-Null
+    }
 }
+
+# ─── 3. Telegram credentials ─────────────────────────────────
 
 function Setup-Telegram {
     Show-Header "3. Переналаштування Telegram"
-    Setup-Telegram-Full
+    Setup-Telegram-Credentials
     Write-Info "Перезапустіть бота (пункт 7) для застосування змін"
     Pause-Return
 }
 
-# ─── 4. Reconfigure OpenAI ───────────────────────────────────
+function Setup-Telegram-Credentials {
+    Write-Host "  TG_BOT_TOKEN та TG_GROUP_ID будуть зашифровані." -ForegroundColor DarkGray
+    Write-Host ""
+    $token   = Read-Secret "TG_BOT_TOKEN"
+    $groupId = Read-Secret "TG_GROUP_ID"
+
+    Set-EnvValue "TG_BOT_TOKEN" (Protect-Value $token)
+    Set-EnvValue "TG_GROUP_ID"  (Protect-Value $groupId)
+
+    Write-Ok "Telegram збережено (зашифровано)"
+}
+
+# ─── 4. OpenAI ───────────────────────────────────────────────
 
 function Setup-OpenAI {
-    if (-not (Show-Header -and $false)) { Show-Header "4. Переналаштування OpenAI" }
-    Write-Host "  ── OpenAI налаштування ──" -ForegroundColor Cyan
+    Show-Header "4. Переналаштування OpenAI"
+    Setup-OpenAI-Credentials
+    Pause-Return
+}
+
+function Setup-OpenAI-Credentials {
+    Write-Host "  OPENAI_API_KEY буде зашифрований." -ForegroundColor DarkGray
+    Write-Host ""
     $apiKey = Read-Secret "OPENAI_API_KEY"
-    $model  = Read-Host  "  OPENAI_MODEL [gpt-4o-mini]"
-    if (-not $model) { $model = "gpt-4o-mini" }
+    $env    = Read-Env
+    $model  = Read-Host "  OPENAI_MODEL [$( if ($env['OPENAI_MODEL']) { $env['OPENAI_MODEL'] } else { 'gpt-4o-mini' })]"
+    if (-not $model) { $model = if ($env["OPENAI_MODEL"]) { $env["OPENAI_MODEL"] } else { "gpt-4o-mini" } }
 
     Set-EnvValue "OPENAI_API_KEY" (Protect-Value $apiKey)
     Set-EnvValue "OPENAI_MODEL"   $model
 
-    Write-Ok "OpenAI збережено (ключ — зашифрований)"
-}
-
-function Reconfigure-OpenAI {
-    Show-Header "4. Переналаштування OpenAI"
-    Setup-OpenAI
-    Pause-Return
+    Write-Ok "OpenAI збережено (зашифровано)"
 }
 
 # ─── 5. Show config ──────────────────────────────────────────
@@ -269,30 +375,39 @@ function Show-Config {
     $env = Read-Env
 
     $fields = @(
-        @{K="SERVER_ID";           L="Сервер ID"         },
-        @{K="COMPANY_NAME";        L="Назва компанії"     },
-        @{K="TG_BOT_TOKEN";        L="Telegram токен"     },
-        @{K="TG_GROUP_ID";         L="Telegram група"     },
-        @{K="TG_TOPIC_ID";         L="Telegram топік"     },
-        @{K="OPENAI_API_KEY";      L="OpenAI ключ"        },
-        @{K="OPENAI_MODEL";        L="OpenAI модель"      },
-        @{K="DISK_PATHS";          L="Диски"              },
-        @{K="DISK_WARNING_PERCENT";L="Диск warn %"        },
-        @{K="CPU_WARNING_PERCENT"; L="CPU warn %"         },
-        @{K="RAM_WARNING_PERCENT"; L="RAM warn %"         },
-        @{K="BACKUP_PATH";         L="Шлях бекапів"       },
-        @{K="MONITOR_SERVICES";    L="Сервіси"            },
-        @{K="ALERT_COOLDOWN_MIN";  L="Кулдаун (хв)"      }
+        @{K="SERVER_ID";            L="Сервер ID"       },
+        @{K="COMPANY_NAME";         L="Назва компанії"  },
+        @{K="TG_BOT_TOKEN";         L="Telegram токен"  },
+        @{K="TG_GROUP_ID";          L="Telegram група"  },
+        @{K="TG_TOPIC_ID";          L="Telegram топік"  },
+        @{K="OPENAI_API_KEY";       L="OpenAI ключ"     },
+        @{K="OPENAI_MODEL";         L="OpenAI модель"   },
+        @{K="DISK_PATHS";           L="Диски"           },
+        @{K="DISK_WARNING_PERCENT"; L="Диск warn %"     },
+        @{K="CPU_WARNING_PERCENT";  L="CPU warn %"      },
+        @{K="RAM_WARNING_PERCENT";  L="RAM warn %"      },
+        @{K="BACKUP_PATH";          L="Папка бекапів"   },
+        @{K="BACKUP_MAX_AGE_HOURS"; L="Макс. вік (год)" },
+        @{K="BACKUP_MIN_SIZE_MB";   L="Мін. розмір (MB)"},
+        @{K="ALERT_COOLDOWN_MIN";   L="Кулдаун (хв)"   }
     )
 
     foreach ($f in $fields) {
         $label = $f.L.PadRight(22)
         $value = Get-DisplayValue $f.K $env
-        $color = if ($value -eq "[не задано]") { "DarkGray" } `
-            elseif ($value -eq "[зашифровано]") { "Green" } `
-            else { "White" }
+        $color = if ($value -eq "[не задано]")   { "DarkGray" } `
+            elseif ($value -eq "[зашифровано]")  { "Green"    } `
+            else                                 { "White"    }
         Write-Host "  $label : " -NoNewline
         Write-Host $value -ForegroundColor $color
+    }
+
+    # Перевірка папки бекапів
+    $backupPath = $env["BACKUP_PATH"]
+    if ($backupPath -and (Test-Path $backupPath)) {
+        Write-Host ""
+        Write-Host "  ── Стан бекапів ──" -ForegroundColor Cyan
+        Test-BackupFolder $backupPath | Out-Null
     }
 
     Pause-Return
@@ -306,17 +421,13 @@ function Show-Status {
     foreach ($name in @("1C_Monitor", "1C_Monitor_Bot")) {
         $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if (-not $task) {
-            Write-Host "  $name" -NoNewline -ForegroundColor White
-            Write-Host " [НЕ ВСТАНОВЛЕНО]" -ForegroundColor DarkGray
+            Write-Host "  $name [НЕ ВСТАНОВЛЕНО]" -ForegroundColor DarkGray
+            Write-Host ""
             continue
         }
         $info  = Get-ScheduledTaskInfo -TaskName $name
         $state = $task.State
-        $color = switch ($state) {
-            "Running" { "Green" }
-            "Ready"   { "Cyan"  }
-            default   { "Red"   }
-        }
+        $color = switch ($state) { "Running" { "Green" } "Ready" { "Cyan" } default { "Red" } }
         Write-Host "  $name" -NoNewline -ForegroundColor White
         Write-Host " [$state]" -ForegroundColor $color
         Write-Host "    Останній запуск : $($info.LastRunTime)"
@@ -343,10 +454,8 @@ function Restart-Monitor {
         try {
             Stop-ScheduledTask  -TaskName $name -ErrorAction SilentlyContinue
             Start-ScheduledTask -TaskName $name
-            Write-Ok "Завдання $name перезапущено"
-        } catch {
-            Write-Err "Не вдалося перезапустити $name"
-        }
+            Write-Ok "$name перезапущено"
+        } catch { Write-Err "Не вдалося перезапустити $name" }
     }
 
     Pause-Return
@@ -359,13 +468,10 @@ function Uninstall-Monitor {
     Write-Host "  Це видалить Task Scheduler завдання." -ForegroundColor Red
     Write-Host ""
     $confirm = Read-Host "  Введіть 'ТАК' для підтвердження"
-    if ($confirm -cne "ТАК") {
-        Write-Info "Скасовано."
-        Pause-Return; return
-    }
+    if ($confirm -cne "ТАК") { Write-Info "Скасовано."; Pause-Return; return }
 
     foreach ($name in @("1C_Monitor", "1C_Monitor_Bot")) {
-        Stop-ScheduledTask       -TaskName $name -ErrorAction SilentlyContinue
+        Stop-ScheduledTask       -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
         Write-Ok "Завдання $name видалено"
     }
@@ -379,7 +485,7 @@ function Uninstall-Monitor {
     Write-Host ""
     $delFiles = Read-Host "  Видалити всі файли програми? (введіть 'ТАК')"
     if ($delFiles -cne "ТАК") {
-        Write-Ok "Завдання видалено. Файли залишені у: $ScriptDir"
+        Write-Ok "Завдання видалено. Файли залишені: $ScriptDir"
         Pause-Return; return
     }
 
@@ -388,11 +494,11 @@ function Uninstall-Monitor {
         Remove-Item $ScriptDir -Recurse -Force
         Write-Ok "Файли видалені"
     } catch {
-        Write-Err "Не вдалося видалити деякі файли (можливо відкриті): $_"
+        Write-Err "Деякі файли не вдалося видалити (можливо відкриті): $_"
     }
 
     Write-Host ""
-    Write-Host "  Видалення завершено. Вікно закриється через 3 секунди..." -ForegroundColor Green
+    Write-Host "  Готово. Вікно закриється через 3 секунди..." -ForegroundColor Green
     Start-Sleep 3
     exit
 }
@@ -401,30 +507,30 @@ function Uninstall-Monitor {
 
 while ($true) {
     Show-Header "1С Monitor — Управління"
-    Write-Host "  1. Встановити / Оновити"              -ForegroundColor White
-    Write-Host "  2. Змінити Telegram топік"            -ForegroundColor White
-    Write-Host "  3. Переналаштувати Telegram"          -ForegroundColor White
-    Write-Host "  4. Переналаштувати OpenAI"            -ForegroundColor White
-    Write-Host "  5. Переглянути налаштування"          -ForegroundColor White
-    Write-Host "  6. Статус завдань"                    -ForegroundColor White
-    Write-Host "  7. Перезапустити моніторинг"          -ForegroundColor White
-    Write-Host "  8. Видалити"                          -ForegroundColor Red
-    Write-Host "  0. Вийти"                             -ForegroundColor DarkGray
+    Write-Host "  1. Встановити / Оновити"                     -ForegroundColor White
+    Write-Host "  2. Налаштувати компанію  (назва / топік / бекапи)" -ForegroundColor White
+    Write-Host "  3. Переналаштувати Telegram  (токен / група)" -ForegroundColor White
+    Write-Host "  4. Переналаштувати OpenAI"                   -ForegroundColor White
+    Write-Host "  5. Переглянути налаштування"                 -ForegroundColor White
+    Write-Host "  6. Статус завдань"                           -ForegroundColor White
+    Write-Host "  7. Перезапустити моніторинг"                 -ForegroundColor White
+    Write-Host "  8. Видалити"                                 -ForegroundColor Red
+    Write-Host "  0. Вийти"                                    -ForegroundColor DarkGray
     Write-Host ""
 
     $choice = Read-Host "  Ваш вибір"
     switch ($choice) {
-        "1" { Install-Monitor    }
-        "2" { Setup-Topic        }
-        "3" { Setup-Telegram     }
-        "4" { Reconfigure-OpenAI }
-        "5" { Show-Config        }
-        "6" { Show-Status        }
-        "7" { Restart-Monitor    }
-        "8" { Uninstall-Monitor  }
-        "0" { exit               }
+        "1" { Install-Monitor  }
+        "2" { Setup-Company    }
+        "3" { Setup-Telegram   }
+        "4" { Setup-OpenAI     }
+        "5" { Show-Config      }
+        "6" { Show-Status      }
+        "7" { Restart-Monitor  }
+        "8" { Uninstall-Monitor }
+        "0" { exit             }
         default {
-            Write-Host "  Невірний вибір. Спробуйте ще раз." -ForegroundColor Red
+            Write-Host "  Невірний вибір." -ForegroundColor Red
             Start-Sleep 1
         }
     }

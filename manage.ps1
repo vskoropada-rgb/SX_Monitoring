@@ -710,11 +710,13 @@ function Update-FromGitHub {
     $files = @(
         "main.py", "monitor.py", "bot.py", "config.py",
         "storage.py", "analyzer.py", "notifier.py", "charts.py",
-        "actions.py", "watchdog.ps1", "requirements.txt",
-        "collectors/disk.py", "collectors/memory.py",
+        "actions.py", "manage.ps1", "watchdog.ps1", "install.ps1",
+        "requirements.txt", ".env.example",
+        "collectors/__init__.py",
+        "collectors/disk.py",     "collectors/memory.py",
         "collectors/services.py", "collectors/backup.py",
-        "collectors/winupdate.py", "collectors/security.py",
-        "collectors/rdp.py", "collectors/usb.py",
+        "collectors/winupdate.py","collectors/security.py",
+        "collectors/rdp.py",      "collectors/usb.py",
         "collectors/software.py", "collectors/schtasks.py"
     )
 

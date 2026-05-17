@@ -654,6 +654,142 @@ function Uninstall-Monitor {
     exit
 }
 
+# ─── 9. Test Telegram ────────────────────────────────────────
+
+function Test-Telegram {
+    Show-Header "9. Тест Telegram"
+
+    $env     = Read-Env
+    $token   = Unprotect-Value $env["TG_BOT_TOKEN"]
+    $groupId = Unprotect-Value $env["TG_GROUP_ID"]
+    $topicId = $env["TG_TOPIC_ID"]
+    $company = if ($env["COMPANY_NAME"]) { $env["COMPANY_NAME"] } else { $env:COMPUTERNAME }
+    $serverId = if ($env["SERVER_ID"])   { $env["SERVER_ID"]    } else { "?" }
+
+    if (-not $token -or -not $groupId) {
+        Write-Err "Telegram не налаштований. Виконайте спочатку пункт 3."
+        Pause-Return; return
+    }
+
+    Write-Step "Надсилаю тестове повідомлення..."
+
+    $body = @{
+        chat_id    = $groupId
+        text       = "✅ <b>Тест підключення</b>`n`nСервер: <b>$company</b> ($serverId)`nЧас: $(Get-Date -Format 'HH:mm dd.MM.yyyy')`n`n🔧 manage.ps1 → Тест Telegram"
+        parse_mode = "HTML"
+    }
+    if ($topicId) { $body["message_thread_id"] = [int]$topicId }
+
+    try {
+        $resp = Invoke-RestMethod `
+            -Uri "https://api.telegram.org/bot$token/sendMessage" `
+            -Method Post `
+            -Body ($body | ConvertTo-Json -Compress) `
+            -ContentType "application/json; charset=utf-8" `
+            -ErrorAction Stop
+        if ($resp.ok) {
+            Write-Ok "Повідомлення надіслано успішно!"
+            Write-Info "Перевірте групу в Telegram"
+        } else {
+            Write-Err "Telegram API: $($resp.description)"
+        }
+    } catch {
+        Write-Err "Помилка запиту: $_"
+    }
+
+    Pause-Return
+}
+
+# ─── U. Update from GitHub ───────────────────────────────────
+
+function Update-FromGitHub {
+    Show-Header "U. Оновлення з GitHub"
+
+    $REPO_RAW = "https://raw.githubusercontent.com/vskoropada-rgb/linux-scripts/main/Monitoring"
+
+    $files = @(
+        "main.py", "monitor.py", "bot.py", "config.py",
+        "storage.py", "analyzer.py", "notifier.py", "charts.py",
+        "actions.py", "watchdog.ps1", "requirements.txt",
+        "collectors/disk.py", "collectors/memory.py",
+        "collectors/services.py", "collectors/backup.py",
+        "collectors/winupdate.py", "collectors/security.py",
+        "collectors/rdp.py", "collectors/usb.py",
+        "collectors/software.py", "collectors/schtasks.py"
+    )
+
+    Write-Step "Перевірка підключення до GitHub..."
+    try {
+        Invoke-WebRequest -Uri "$REPO_RAW/main.py" -Method Head `
+            -UseBasicParsing -ErrorAction Stop | Out-Null
+        Write-Ok "GitHub доступний"
+    } catch {
+        Write-Err "Не вдалося підключитися до GitHub: $_"
+        Pause-Return; return
+    }
+
+    # Резервна копія перед оновленням
+    $backupDir = Join-Path $ScriptDir ".backup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+    Write-Step "Резервна копія → $backupDir"
+    try {
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+        Get-ChildItem $ScriptDir -Filter "*.py"  -File | Copy-Item -Destination $backupDir
+        Get-ChildItem $ScriptDir -Filter "*.ps1" -File | Copy-Item -Destination $backupDir
+        if (Test-Path "$ScriptDir\requirements.txt") {
+            Copy-Item "$ScriptDir\requirements.txt" $backupDir
+        }
+        Write-Ok "Резервну копію створено"
+    } catch {
+        Write-Err "Помилка резервної копії: $_"
+    }
+
+    # Завантаження файлів
+    $updated = 0; $skipped = 0
+    $ProgressPreference = "SilentlyContinue"
+
+    foreach ($file in $files) {
+        $url  = "$REPO_RAW/$file"
+        $dest = Join-Path $ScriptDir $file
+
+        $destDir = Split-Path $dest -Parent
+        if (-not (Test-Path $destDir)) {
+            New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+        }
+
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+            Write-Ok $file
+            $updated++
+        } catch {
+            Write-Info "Пропущено: $file"
+            $skipped++
+        }
+    }
+
+    $ProgressPreference = "Continue"
+
+    Write-Host ""
+    Write-Ok "Оновлено: $updated  Пропущено: $skipped"
+
+    # Оновити pip-залежності
+    Write-Host ""
+    $ans = Read-Host "  Оновити pip-залежності? (Y/n)"
+    if ($ans -ne "n" -and $ans -ne "N") {
+        Write-Step "pip install -r requirements.txt..."
+        python -m pip install -r $ReqFile --quiet 2>&1 | Out-Null
+        Write-Ok "Залежності оновлені"
+    }
+
+    # Перезапуск
+    Write-Host ""
+    $ans = Read-Host "  Перезапустити моніторинг? (Y/n)"
+    if ($ans -ne "n" -and $ans -ne "N") {
+        Restart-Monitor
+    } else {
+        Pause-Return
+    }
+}
+
 # ─── Main menu ───────────────────────────────────────────────
 
 while ($true) {
@@ -668,21 +804,26 @@ while ($true) {
     Write-Host "  6. Статус завдань"                                 -ForegroundColor White
     Write-Host "  7. Перезапустити моніторинг"                      -ForegroundColor White
     Write-Host "  8. Видалити"                                       -ForegroundColor Red
+    Write-Host "  ───────────────────────────────────────────────"  -ForegroundColor DarkGray
+    Write-Host "  9. Тест Telegram  (перевірка надсилання)"         -ForegroundColor Cyan
+    Write-Host "  U. Оновлення з GitHub"                            -ForegroundColor Cyan
     Write-Host "  Q. Вийти"                                         -ForegroundColor DarkGray
     Write-Host ""
 
     $choice = Read-Host "  Ваш вибір"
     switch ($choice.ToUpper()) {
-        "0" { Prepare-Server    }
-        "1" { Install-Monitor   }
-        "2" { Setup-Company     }
-        "3" { Setup-Telegram    }
-        "4" { Setup-OpenAI      }
-        "5" { Show-Config       }
-        "6" { Show-Status       }
-        "7" { Restart-Monitor   }
-        "8" { Uninstall-Monitor }
-        "Q" { exit              }
+        "0" { Prepare-Server      }
+        "1" { Install-Monitor     }
+        "2" { Setup-Company       }
+        "3" { Setup-Telegram      }
+        "4" { Setup-OpenAI        }
+        "5" { Show-Config         }
+        "6" { Show-Status         }
+        "7" { Restart-Monitor     }
+        "8" { Uninstall-Monitor   }
+        "9" { Test-Telegram       }
+        "U" { Update-FromGitHub   }
+        "Q" { exit                }
         default {
             Write-Host "  Невірний вибір." -ForegroundColor Red
             Start-Sleep 1

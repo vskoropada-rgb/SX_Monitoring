@@ -353,20 +353,25 @@ def process_message(message: dict):
 
     logger.info(f"Повідомлення: {text}")
 
-    if text in ("/status", "/start"):
+    # В групах Telegram команди надходять як /cmd@botname — відкидаємо суфікс
+    first_word = text.split()[0]
+    cmd = first_word.split("@")[0].lower()
+    args = text[len(first_word):].strip()
+
+    if cmd in ("/status", "/start"):
         handle_status()
-    elif text == "/sessions":
+    elif cmd == "/sessions":
         handle_sessions()
-    elif text == "/disk":
+    elif cmd == "/disk":
         handle_disk()
-    elif text == "/backups":
+    elif cmd == "/backups":
         handle_backups()
-    elif text.startswith("/chart"):
+    elif cmd == "/chart":
         handle_chart(24)
-    elif text.startswith("/maintenance"):
+    elif cmd == "/maintenance":
         # /maintenance 2h  або  /maintenance off
-        parts = text.split()
-        arg = parts[1].lower() if len(parts) > 1 else ""
+        parts = args.split()
+        arg = parts[0].lower() if parts else ""
         if arg == "off":
             storage.clear_maintenance(SERVER_ID)
             send("✅ Режим обслуговування знято")
@@ -384,6 +389,19 @@ def process_message(message: dict):
 
 def run():
     logger.info(f"Бот запущений для {COMPANY} ({SERVER_ID})")
+
+    if not BOT_TOKEN:
+        logger.error("TG_BOT_TOKEN не налаштований — бот не може запуститись")
+        return
+
+    me = api_call("getMe", {})
+    if me.get("ok"):
+        username = me["result"].get("username", "?")
+        logger.info(f"Бот авторизований як @{username}")
+    else:
+        logger.error(f"getMe помилка: {me.get('description', 'невідомо')} — перевірте TG_BOT_TOKEN")
+        return
+
     offset = 0
 
     while True:
@@ -393,6 +411,11 @@ def run():
                 "timeout": 30,
                 "allowed_updates": ["message", "callback_query"],
             })
+
+            if not result.get("ok"):
+                logger.error(f"getUpdates помилка: {result.get('description', result)}")
+                time.sleep(5)
+                continue
 
             updates = result.get("result", [])
             for update in updates:

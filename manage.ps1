@@ -604,7 +604,32 @@ function Setup-Services {
     if ($services) { Set-EnvValue "MONITOR_SERVICES" $services }
 }
 
-# ─── B. Base config export / import ─────────────────────────
+# ─── B. Base config export / import (AES-256) ────────────────
+
+function Get-AesKey {
+    param([string]$Password)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    return $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Password))
+}
+
+function Protect-WithPassword {
+    param([string]$Plaintext, [byte[]]$Key)
+    if (-not $Plaintext) { return "" }
+    $secure = ConvertTo-SecureString $Plaintext -AsPlainText -Force
+    return ConvertFrom-SecureString $secure -Key $Key
+}
+
+function Unprotect-WithPassword {
+    param([string]$Encrypted, [byte[]]$Key)
+    if (-not $Encrypted) { return "" }
+    try {
+        $secure = ConvertTo-SecureString $Encrypted -Key $Key
+        $bstr   = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        $plain  = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        return $plain
+    } catch { return $null }
+}
 
 function Export-BaseConfig {
     Show-Header "B. Експорт базового конфігу"
@@ -613,34 +638,44 @@ function Export-BaseConfig {
     $token   = Unprotect-Value $env["TG_BOT_TOKEN"]
     $groupId = Unprotect-Value $env["TG_GROUP_ID"]
     $apiKey  = Unprotect-Value $env["OPENAI_API_KEY"]
-    $model   = $env["OPENAI_MODEL"]
+    $model   = if ($env["OPENAI_MODEL"]) { $env["OPENAI_MODEL"] } else { "gpt-4o-mini" }
 
     if (-not $token -or -not $groupId) {
         Write-Err "TG_BOT_TOKEN або TG_GROUP_ID не налаштовані — спочатку виконайте пункт 3"
         Pause-Return; return
     }
 
+    Write-Host "  Файл буде зашифрований паролем (AES-256)." -ForegroundColor DarkGray
+    Write-Host "  Запам'ятайте пароль — він потрібен при імпорті на новому сервері." -ForegroundColor DarkGray
+    Write-Host ""
+    $pwd1 = Read-Secret "Пароль"
+    $pwd2 = Read-Secret "Повторіть пароль"
+
+    if ($pwd1 -ne $pwd2 -or -not $pwd1) {
+        Write-Err "Паролі не співпадають або порожні"
+        Pause-Return; return
+    }
+
+    $key = Get-AesKey $pwd1
+
     $basePath = Join-Path $ScriptDir ".env.base"
     @"
-TG_BOT_TOKEN=$token
-TG_GROUP_ID=$groupId
-OPENAI_API_KEY=$apiKey
-OPENAI_MODEL=$( if ($model) { $model } else { "gpt-4o-mini" } )
+TG_BOT_TOKEN=$(Protect-WithPassword $token   $key)
+TG_GROUP_ID=$(Protect-WithPassword  $groupId $key)
+OPENAI_API_KEY=$(Protect-WithPassword $apiKey $key)
+OPENAI_MODEL=$model
 "@ | Set-Content $basePath -Encoding UTF8
 
     Write-Ok "Файл збережено: $basePath"
     Write-Host ""
-    Write-Host "  Скопіюйте цей файл на новий сервер поруч з manage.ps1" -ForegroundColor Yellow
-    Write-Host "  При першому запуску manage.ps1 токени підтягнуться автоматично" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  ! Файл містить токени у відкритому вигляді — зберігайте обережно" -ForegroundColor Red
+    Write-Host "  Скопіюйте .env.base на новий сервер поруч з manage.ps1" -ForegroundColor Yellow
+    Write-Host "  При першому запуску буде запитано пароль для розшифрування" -ForegroundColor Yellow
     Pause-Return
 }
 
 function Import-BaseConfig {
     param([string]$Path = "")
     if (-not $Path) { $Path = Join-Path $ScriptDir ".env.base" }
-
     if (-not (Test-Path $Path)) { return $false }
 
     $lines = Get-Content $Path -Encoding UTF8 -ErrorAction SilentlyContinue
@@ -650,23 +685,32 @@ function Import-BaseConfig {
             $base[$matches[1]] = $matches[2]
         }
     }
+    if (-not $base["TG_BOT_TOKEN"]) { return $false }
 
-    $token   = $base["TG_BOT_TOKEN"]
-    $groupId = $base["TG_GROUP_ID"]
+    Write-Host ""
+    Write-Ok "Знайдено .env.base — введіть пароль для розшифрування"
+    $pwd = Read-Secret "Пароль"
+    $key = Get-AesKey $pwd
 
-    if (-not $token -or -not $groupId) { return $false }
+    $token   = Unprotect-WithPassword $base["TG_BOT_TOKEN"] $key
+    $groupId = Unprotect-WithPassword $base["TG_GROUP_ID"]  $key
 
-    Write-Ok "Знайдено .env.base — імпортую спільні токени..."
+    if (-not $token -or -not $groupId) {
+        Write-Err "Невірний пароль або файл пошкоджений"
+        return $false
+    }
+
     Set-EnvValue "TG_BOT_TOKEN" (Protect-Value $token)
     Set-EnvValue "TG_GROUP_ID"  (Protect-Value $groupId)
 
     if ($base["OPENAI_API_KEY"]) {
-        Set-EnvValue "OPENAI_API_KEY" (Protect-Value $base["OPENAI_API_KEY"])
+        $apiKey = Unprotect-WithPassword $base["OPENAI_API_KEY"] $key
+        if ($apiKey) { Set-EnvValue "OPENAI_API_KEY" (Protect-Value $apiKey) }
     }
     $model = if ($base["OPENAI_MODEL"]) { $base["OPENAI_MODEL"] } else { "gpt-4o-mini" }
     Set-EnvValue "OPENAI_MODEL" $model
 
-    Write-Ok "Токени імпортовано та зашифровано"
+    Write-Ok "Токени імпортовано та зашифровано DPAPI"
     return $true
 }
 

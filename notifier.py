@@ -3,6 +3,7 @@ notifier.py — відправка повідомлень в Telegram
 """
 import requests
 import logging
+from typing import List
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ def _format_metrics_block(metrics: dict) -> str:
     return "\n".join(parts)
 
 
-def _extract_block_ips(decision: dict, metrics: dict) -> list[str]:
+def _extract_block_ips(decision: dict, metrics: dict) -> List[str]:
     """Повертає список IP які треба запропонувати заблокувати"""
     tags = decision.get("tags", [])
     ips = []

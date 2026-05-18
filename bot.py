@@ -15,6 +15,7 @@ import requests
 import json
 import time
 import threading
+from typing import Optional
 from datetime import datetime
 
 import storage
@@ -34,7 +35,7 @@ DISK_PATHS = [p.strip() for p in _cfg.get("DISK_PATHS", "C:\\").split(",")]
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # Тред де була написана команда — відповідаємо туди ж, не в TOPIC_ID
-_reply_thread_id: int | None = None
+_reply_thread_id: Optional[int] = None
 
 # Кеш сесій — subprocess qwinsta дорогий, кешуємо на 30с
 _sessions_cache: list = []
@@ -382,7 +383,7 @@ def handle_unblock_do(ip: str, message_id=None):
 
 # ─── Dispatcher ─────────────────────────────────────────────
 
-def _dispatch_callback(data: str, message_id: int | None):
+def _dispatch_callback(data: str, message_id: Optional[int]):
     """Виконується в окремому потоці — не блокує polling loop"""
     if data.startswith("status_"):
         handle_status(message_id)

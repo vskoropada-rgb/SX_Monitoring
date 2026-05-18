@@ -3,6 +3,7 @@ actions.py — дії на сервері: завершення сесій, пе
 """
 import subprocess
 import logging
+from typing import List, Tuple
 import psutil
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ def get_sessions() -> list:
     return sessions
 
 
-def kick_session(session_id: str) -> tuple[bool, str]:
+def kick_session(session_id: str) -> Tuple[bool, str]:
     """Завершує RDP сесію за ID"""
     try:
         result = subprocess.run(
@@ -74,7 +75,7 @@ def kick_session(session_id: str) -> tuple[bool, str]:
         return False, f"Виняток: {e}"
 
 
-def kick_all_sessions() -> tuple[bool, str]:
+def kick_all_sessions() -> Tuple[bool, str]:
     """Завершує всі активні RDP сесії"""
     sessions = get_sessions()
     if not sessions:
@@ -90,7 +91,7 @@ def kick_all_sessions() -> tuple[bool, str]:
     return True, "\n".join(results)
 
 
-def restart_service(service_name: str) -> tuple[bool, str]:
+def restart_service(service_name: str) -> Tuple[bool, str]:
     """Перезапускає Windows сервіс"""
     try:
         # Зупиняємо
@@ -118,7 +119,7 @@ def restart_service(service_name: str) -> tuple[bool, str]:
         return False, f"Виняток: {e}"
 
 
-def start_service(service_name: str) -> tuple[bool, str]:
+def start_service(service_name: str) -> Tuple[bool, str]:
     """Запускає зупинений сервіс"""
     try:
         result = subprocess.run(
@@ -133,7 +134,7 @@ def start_service(service_name: str) -> tuple[bool, str]:
         return False, f"Виняток: {e}"
 
 
-def reboot_server(delay_sec: int = 30) -> tuple[bool, str]:
+def reboot_server(delay_sec: int = 30) -> Tuple[bool, str]:
     """Перезавантажує сервер з затримкою"""
     try:
         result = subprocess.run(
@@ -148,7 +149,7 @@ def reboot_server(delay_sec: int = 30) -> tuple[bool, str]:
         return False, f"Виняток: {e}"
 
 
-def cancel_reboot() -> tuple[bool, str]:
+def cancel_reboot() -> Tuple[bool, str]:
     """Скасовує заплановане перезавантаження"""
     try:
         subprocess.run(["shutdown", "/a"], capture_output=True)
@@ -157,7 +158,7 @@ def cancel_reboot() -> tuple[bool, str]:
         return False, str(e)
 
 
-def block_ip(ip: str) -> tuple[bool, str]:
+def block_ip(ip: str) -> Tuple[bool, str]:
     """Блокує вхідні з'єднання з IP через Windows Firewall"""
     rule_name = f"{_FW_RULE_PREFIX}{ip}"
     try:
@@ -177,7 +178,7 @@ def block_ip(ip: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-def unblock_ip(ip: str) -> tuple[bool, str]:
+def unblock_ip(ip: str) -> Tuple[bool, str]:
     """Знімає блокування IP з Windows Firewall"""
     rule_name = f"{_FW_RULE_PREFIX}{ip}"
     try:
@@ -196,7 +197,7 @@ def unblock_ip(ip: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-def list_blocked_ips() -> list[str]:
+def list_blocked_ips() -> List[str]:
     """Повертає список IP заблокованих через цей моніторинг"""
     try:
         ps_cmd = (

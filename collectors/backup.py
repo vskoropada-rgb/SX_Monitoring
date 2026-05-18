@@ -6,6 +6,7 @@ import glob
 import zipfile
 import logging
 from collections import Counter
+from typing import Optional
 from datetime import datetime, timedelta
 import storage
 
@@ -68,7 +69,7 @@ def _check_archive(filepath: str, password: str = None) -> str:
     return "too_small" if os.path.getsize(filepath) <= 1024 else "ok"
 
 
-def _get_expected_backup_hour() -> int | None:
+def _get_expected_backup_hour() -> Optional[int]:
     """Вираховує типову годину бекапу на основі历史"""
     history = storage.get_backup_history(days=30)
     if len(history) < 5:

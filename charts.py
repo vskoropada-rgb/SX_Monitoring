@@ -4,10 +4,11 @@ charts.py — генерація графіків через matplotlib
 import os
 import tempfile
 from datetime import datetime
+from typing import Optional
 from storage import get_metrics_history, get_backup_history
 
 
-def generate_chart(metric_name: str, hours: int = 24, title: str = None) -> str | None:
+def generate_chart(metric_name: str, hours: int = 24, title: str = None) -> Optional[str]:
     """Генерує PNG графік і повертає шлях до файлу"""
     try:
         import matplotlib
@@ -77,7 +78,7 @@ def generate_chart(metric_name: str, hours: int = 24, title: str = None) -> str 
         return None
 
 
-def generate_combined_chart(server_id: str, hours: int = 24) -> str | None:
+def generate_combined_chart(server_id: str, hours: int = 24) -> Optional[str]:
     """Комбінований графік CPU + RAM"""
     try:
         import matplotlib
@@ -137,7 +138,7 @@ def generate_combined_chart(server_id: str, hours: int = 24) -> str | None:
         return None
 
 
-def generate_backup_chart(days: int = 30) -> str | None:
+def generate_backup_chart(days: int = 30) -> Optional[str]:
     """Графік розміру ZIP-бекапів за N днів"""
     try:
         import matplotlib

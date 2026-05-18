@@ -3,6 +3,7 @@ analyzer.py — GPT-4o-mini аналіз метрик і прийняття рі
 """
 import json
 import os
+from typing import Optional
 from openai import OpenAI
 from datetime import datetime
 
@@ -30,7 +31,7 @@ SYSTEM_PROMPT = """Ти — експерт з моніторингу Windows с�
 """
 
 
-def analyze(metrics: dict, config: dict) -> dict | None:
+def analyze(metrics: dict, config: dict) -> Optional[dict]:
     """
     Передає метрики GPT і отримує рішення.
     Повертає dict з рішенням або None якщо не треба слати.
@@ -196,7 +197,7 @@ def _has_anything_notable(metrics: dict, config: dict) -> bool:
     return False
 
 
-def _fallback_rules(metrics: dict, config: dict) -> dict | None:
+def _fallback_rules(metrics: dict, config: dict) -> Optional[dict]:
     """Резервна логіка якщо GPT недоступний"""
     alerts = []
 

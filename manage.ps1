@@ -1,4 +1,4 @@
-# manage.ps1 - 1C Monitor Management Script
+﻿# manage.ps1 - 1C Monitor Management Script
 # Run as Administrator: Right-click -> "Run with PowerShell" (as Admin)
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -706,7 +706,7 @@ function Test-Telegram {
 function Update-FromGitHub {
     Show-Header "U. Оновлення з GitHub"
 
-    $REPO_RAW = "https://raw.githubusercontent.com/vskoropada-rgb/linux-scripts/main/Monitoring"
+    $REPO_RAW = "https://raw.githubusercontent.com/vskoropada-rgb/SX_Monitoring/main"
 
     $files = @(
         "main.py", "monitor.py", "bot.py", "config.py",
@@ -763,6 +763,14 @@ function Update-FromGitHub {
 
         try {
             Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+            # Add UTF-8 BOM to .ps1 files so PowerShell 5.x reads them as UTF-8
+            if ($file.EndsWith('.ps1')) {
+                $bytes = [System.IO.File]::ReadAllBytes($dest)
+                $bom   = [byte[]](0xEF, 0xBB, 0xBF)
+                if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+                    [System.IO.File]::WriteAllBytes($dest, $bom + $bytes)
+                }
+            }
             Write-Ok $file
             $updated++
         } catch {

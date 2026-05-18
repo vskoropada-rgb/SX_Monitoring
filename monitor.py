@@ -40,9 +40,6 @@ def run():
     try:
         disk_data = disk.collect(config)
         all_metrics.update(disk_data)
-        storage.save_metric("disk_free_c", next(
-            (d["free_pct"] for d in disk_data.get("disks", []) if "C:" in d.get("path", "")), 0
-        ))
         logger.info("Диски: %s", [f"{d['path']}={d.get('free_pct')}%" for d in disk_data.get("disks", [])])
     except Exception as e:
         logger.error("Помилка збору дисків: %s", e)
@@ -51,8 +48,6 @@ def run():
     try:
         mem_data = memory.collect(config)
         all_metrics.update(mem_data)
-        storage.save_metric("cpu_percent", mem_data.get("cpu", {}).get("percent", 0))
-        storage.save_metric("ram_percent", mem_data.get("ram", {}).get("percent", 0))
         logger.info("CPU: %s%%, RAM: %s%%",
                     mem_data.get("cpu", {}).get("percent"),
                     mem_data.get("ram", {}).get("percent"))

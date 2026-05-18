@@ -1,14 +1,14 @@
 # install.ps1 — bootstrap-встановлення 1C Monitor
 #
 # Запуск (PowerShell від Адміністратора):
-#   irm "https://raw.githubusercontent.com/vskoropada-rgb/linux-scripts/main/Monitoring/install.ps1" | iex
+#   irm "https://raw.githubusercontent.com/vskoropada-rgb/SX_Monitoring/main/install.ps1" | iex
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "SilentlyContinue"
 
 $DEFAULT_DIR = "D:\setup\monitoring-sc"
-$REPO_RAW    = "https://raw.githubusercontent.com/vskoropada-rgb/linux-scripts/main/Monitoring"
+$REPO_RAW    = "https://raw.githubusercontent.com/vskoropada-rgb/SX_Monitoring/main"
 
 $FILES = @(
     "main.py", "monitor.py", "bot.py", "config.py",

@@ -48,16 +48,19 @@ def send_alert(decision: dict, metrics: dict, config: dict) -> bool:
         lines.append("")
         lines.append(f"⚡ <b>Рекомендація:</b> {recommendation}")
 
-    # Додаємо ключові метрики
-    metrics_block = _format_metrics_block(metrics)
-    if metrics_block:
-        lines.append("")
-        lines.append(metrics_block)
+    # Метрики — не додаємо якщо алерт про безпеку/IP (вже є в тексті аналізу)
+    tags = decision.get("tags", [])
+    is_security_alert = any(t in tags for t in ("#brute_force", "#new_ip", "#admin", "#files"))
+    if not is_security_alert:
+        metrics_block = _format_metrics_block(metrics)
+        if metrics_block:
+            lines.append("")
+            lines.append(metrics_block)
 
     text = "\n".join(lines)
 
     # Кнопки дій
-    keyboard = _build_keyboard(decision, config)
+    keyboard = _build_keyboard(decision, config, metrics)
 
     return _send_message(bot_token, group_id, topic_id, text, keyboard)
 
@@ -92,19 +95,40 @@ def _format_metrics_block(metrics: dict) -> str:
     return "\n".join(lines)
 
 
-def _extract_alert_ip(decision: dict) -> str | None:
+def _extract_alert_ip(decision: dict, metrics: dict) -> str | None:
+    """Витягує IP з метрик або alert_key (будь-який формат GPT)"""
+    tags = decision.get("tags", [])
+
+    # Найнадійніший спосіб — прямо з метрик
+    if "#brute_force" in tags:
+        alerts = metrics.get("brute_force_alerts", [])
+        # Беремо невідомий IP з найбільшою кількістю спроб
+        unknown = [a for a in alerts if not a.get("is_known_network")]
+        if unknown:
+            return max(unknown, key=lambda a: a["count"])["ip"]
+        if alerts:
+            return max(alerts, key=lambda a: a["count"])["ip"]
+
+    if "#new_ip" in tags or "#rdp" in tags:
+        rdp_alerts = metrics.get("new_ip_alerts", [])
+        if rdp_alerts:
+            return rdp_alerts[0]["ip"]
+
+    # Fallback: парсимо alert_key
     ak = decision.get("alert_key", "")
-    if ak.startswith("brute_"):
-        return ak[len("brute_"):]
-    if ak.startswith("rdp_new_"):
-        return ak[len("rdp_new_"):]
+    for prefix in ("brute_", "rdp_new_"):
+        if ak.startswith(prefix):
+            return ak[len(prefix):]
+
     return None
 
 
-def _build_keyboard(decision: dict, config: dict) -> dict:
+def _build_keyboard(decision: dict, config: dict, metrics: dict = None) -> dict:
     """Будує inline клавіатуру залежно від типу алерту"""
     tags = decision.get("tags", [])
     server_id = config.get("SERVER_ID", "server")
+    if metrics is None:
+        metrics = {}
 
     row1 = [
         {"text": "📊 Статус", "callback_data": f"status_{server_id}"},
@@ -122,7 +146,7 @@ def _build_keyboard(decision: dict, config: dict) -> dict:
         row2.append({"text": "💾 Деталі диску", "callback_data": f"disk_{server_id}"})
 
     # Кнопка блокування IP для брутфорс та нових RDP
-    ip = _extract_alert_ip(decision)
+    ip = _extract_alert_ip(decision, metrics)
     if ip and ("#brute_force" in tags or "#new_ip" in tags):
         row2.append({"text": f"🚫 Блокувати {ip}", "callback_data": f"block_confirm_{ip}"})
 

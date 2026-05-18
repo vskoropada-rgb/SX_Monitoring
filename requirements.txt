@@ -4,3 +4,4 @@ openai>=1.52.0
 requests==2.31.0
 matplotlib==3.9.0
 pywin32==306
+rarfile>=4.1

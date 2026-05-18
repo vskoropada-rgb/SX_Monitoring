@@ -136,6 +136,9 @@ def handle_status(message_id=None):
             {"text": "🔄 Перезавантажити", "callback_data": f"reboot_confirm_{SERVER_ID}"},
             maint_btn,
         ],
+        [
+            {"text": "🔒 Заблоковані IP", "callback_data": f"blocked_list_{SERVER_ID}"},
+        ],
     ]
 
     send("\n".join(lines), keyboard, message_id)
@@ -297,6 +300,76 @@ def handle_kick_all(message_id=None):
     send(text, keyboard, message_id)
 
 
+def handle_blocked_list(message_id=None):
+    blocked = actions.list_blocked_ips()
+    if not blocked:
+        text = f"🔒 <b>Заблоковані IP — {COMPANY}</b>\n\nЗаблокованих IP немає"
+        keyboard = [[{"text": "🔙 Назад", "callback_data": f"status_{SERVER_ID}"}]]
+        send(text, keyboard, message_id)
+        return
+
+    lines = [f"🔒 <b>Заблоковані IP — {COMPANY}</b>", ""]
+    for ip in blocked:
+        lines.append(f"🚫 <code>{ip}</code>")
+
+    buttons = [{"text": f"🔓 {ip}", "callback_data": f"unblock_confirm_{ip}"} for ip in blocked]
+    keyboard = []
+    for i in range(0, len(buttons), 2):
+        keyboard.append(buttons[i:i+2])
+    keyboard.append([{"text": "🔙 Назад", "callback_data": f"status_{SERVER_ID}"}])
+    send("\n".join(lines), keyboard, message_id)
+
+
+def handle_block_confirm(ip: str, message_id=None):
+    text = (
+        f"🚫 <b>Блокування IP</b>\n\n"
+        f"IP: <code>{ip}</code>\n\n"
+        f"Буде створено правило Windows Firewall яке заблокує "
+        f"всі вхідні з'єднання з цього IP.\n\n"
+        f"Підтвердіть дію:"
+    )
+    keyboard = [
+        [
+            {"text": "✅ Заблокувати", "callback_data": f"block_do_{ip}"},
+            {"text": "❌ Скасувати",   "callback_data": f"status_{SERVER_ID}"},
+        ]
+    ]
+    send(text, keyboard, message_id)
+
+
+def handle_block_do(ip: str, message_id=None):
+    ok, msg = actions.block_ip(ip)
+    icon = "✅" if ok else "❌"
+    keyboard = [
+        [
+            {"text": "🔒 Заблоковані IP", "callback_data": f"blocked_list_{SERVER_ID}"},
+            {"text": "🔙 Статус",          "callback_data": f"status_{SERVER_ID}"},
+        ]
+    ]
+    send(f"{icon} {msg}", keyboard, message_id)
+
+
+def handle_unblock_confirm(ip: str, message_id=None):
+    text = (
+        f"🔓 <b>Зняття блокування</b>\n\n"
+        f"IP: <code>{ip}</code>\n\nПідтвердіть:"
+    )
+    keyboard = [
+        [
+            {"text": "✅ Розблокувати", "callback_data": f"unblock_do_{ip}"},
+            {"text": "❌ Скасувати",    "callback_data": f"blocked_list_{SERVER_ID}"},
+        ]
+    ]
+    send(text, keyboard, message_id)
+
+
+def handle_unblock_do(ip: str, message_id=None):
+    ok, msg = actions.unblock_ip(ip)
+    icon = "✅" if ok else "❌"
+    keyboard = [[{"text": "🔒 Заблоковані IP", "callback_data": f"blocked_list_{SERVER_ID}"}]]
+    send(f"{icon} {msg}", keyboard, message_id)
+
+
 # ─── Dispatcher ─────────────────────────────────────────────
 
 def process_callback(query: dict):
@@ -348,6 +421,16 @@ def process_callback(query: dict):
         service = _cfg.get("MONITOR_SERVICES", "").split(",")[0].strip()
         ok, msg = actions.restart_service(service)
         send(f"{'✅' if ok else '❌'} {msg}")
+    elif data.startswith("blocked_list_"):
+        handle_blocked_list(message_id)
+    elif data.startswith("block_confirm_"):
+        handle_block_confirm(data[len("block_confirm_"):], message_id)
+    elif data.startswith("block_do_"):
+        handle_block_do(data[len("block_do_"):], message_id)
+    elif data.startswith("unblock_confirm_"):
+        handle_unblock_confirm(data[len("unblock_confirm_"):], message_id)
+    elif data.startswith("unblock_do_"):
+        handle_unblock_do(data[len("unblock_do_"):], message_id)
 
 
 def process_message(message: dict):

@@ -92,18 +92,25 @@ def _format_metrics_block(metrics: dict) -> str:
     return "\n".join(lines)
 
 
+def _extract_alert_ip(decision: dict) -> str | None:
+    ak = decision.get("alert_key", "")
+    if ak.startswith("brute_"):
+        return ak[len("brute_"):]
+    if ak.startswith("rdp_new_"):
+        return ak[len("rdp_new_"):]
+    return None
+
+
 def _build_keyboard(decision: dict, config: dict) -> dict:
     """Будує inline клавіатуру залежно від типу алерту"""
     tags = decision.get("tags", [])
     server_id = config.get("SERVER_ID", "server")
-    buttons = []
 
-    row1 = []
+    row1 = [
+        {"text": "📊 Статус", "callback_data": f"status_{server_id}"},
+        {"text": "👥 Сесії",  "callback_data": f"sessions_{server_id}"},
+    ]
     row2 = []
-
-    # Завжди показуємо статус і сесії
-    row1.append({"text": "📊 Статус", "callback_data": f"status_{server_id}"})
-    row1.append({"text": "👥 Сесії", "callback_data": f"sessions_{server_id}"})
 
     if "#service" in tags:
         row2.append({"text": "🔄 Перезапустити сервіс", "callback_data": f"restart_service_{server_id}"})
@@ -114,7 +121,12 @@ def _build_keyboard(decision: dict, config: dict) -> dict:
     if "#disk" in tags:
         row2.append({"text": "💾 Деталі диску", "callback_data": f"disk_{server_id}"})
 
-    buttons.append(row1)
+    # Кнопка блокування IP для брутфорс та нових RDP
+    ip = _extract_alert_ip(decision)
+    if ip and ("#brute_force" in tags or "#new_ip" in tags):
+        row2.append({"text": f"🚫 Блокувати {ip}", "callback_data": f"block_confirm_{ip}"})
+
+    buttons = [row1]
     if row2:
         buttons.append(row2)
 

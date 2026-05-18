@@ -216,6 +216,24 @@ function New-TelegramTopic {
     return $null
 }
 
+function Get-TelegramGroupId {
+    param([string]$Token)
+    try {
+        $resp = Invoke-RestMethod -Uri "https://api.telegram.org/bot$Token/getUpdates" `
+            -Method Get -UseBasicParsing -ErrorAction Stop
+        if ($resp.ok -and $resp.result) {
+            foreach ($upd in ($resp.result | Sort-Object { $_.update_id } -Descending)) {
+                $chatId = $null
+                if ($upd.message)        { $chatId = $upd.message.chat.id }
+                if ($upd.channel_post)   { $chatId = $upd.channel_post.chat.id }
+                if ($upd.my_chat_member) { $chatId = $upd.my_chat_member.chat.id }
+                if ($chatId -and "$chatId" -match "^-\d+$") { return "$chatId" }
+            }
+        }
+    } catch {}
+    return $null
+}
+
 # ─── Backup validation ───────────────────────────────────────
 
 function Test-BackupFolder {
@@ -226,27 +244,31 @@ function Test-BackupFolder {
         return $false
     }
 
-    $zips = Get-ChildItem $Path -Filter "*.zip" -File -ErrorAction SilentlyContinue
-    if (-not $zips) {
-        Write-Info "ZIP-файлів не знайдено (можливо бекап ще не запускався)"
+    $exts = @("*.zip","*.rar","*.7z","*.bak","*.dt","*.1cd")
+    $allFiles = @()
+    foreach ($ext in $exts) {
+        $allFiles += Get-ChildItem $Path -Filter $ext -File -ErrorAction SilentlyContinue
+    }
+
+    if (-not $allFiles) {
+        Write-Info "Архівів не знайдено (zip/rar/7z/bak/dt/1cd) — можливо бекап ще не запускався"
         return $true
     }
 
-    # Відфільтровуємо порожні/пошкоджені (< 1 KB)
-    $valid = $zips | Where-Object { $_.Length -gt 1024 }
-    $tiny  = $zips | Where-Object { $_.Length -le 1024 }
+    $valid = $allFiles | Where-Object { $_.Length -gt 1024 }
+    $tiny  = $allFiles | Where-Object { $_.Length -le 1024 }
 
     if ($tiny) {
-        Write-Err "Знайдено $($tiny.Count) файл(ів) менше 1 KB — можливо пошкоджені:"
-        $tiny | ForEach-Object { Write-Host "    $_  ($($_.Length) байт)" -ForegroundColor Red }
+        Write-Err "Знайдено $($tiny.Count) файл(ів) < 1 KB (можливо пошкоджені)"
     }
 
     if ($valid) {
         $latest = $valid | Sort-Object LastWriteTime -Descending | Select-Object -First 1
         $sizeMB = [math]::Round($latest.Length / 1MB, 1)
         $age    = [math]::Round(((Get-Date) - $latest.LastWriteTime).TotalHours, 1)
-        Write-Ok "Останній бекап: $($latest.Name)  ($sizeMB MB, ${age}г тому)"
-        Write-Ok "Всього валідних ZIP: $($valid.Count)"
+        $ext    = $latest.Extension.ToUpper().TrimStart('.')
+        Write-Ok "Останній: $($latest.Name)  ($sizeMB MB, ${age}г тому) [$ext]"
+        Write-Ok "Всього архівів: $($valid.Count)"
     }
 
     return $true
@@ -440,15 +462,26 @@ function Install-Monitor {
 }
 
 function Setup-FirstRun {
-    Write-Host "  ── Крок 1: Telegram ──" -ForegroundColor Cyan
+    Write-Host "  Кроки: Telegram → Сервер → Диски → Сервіси → OpenAI (опція)" -ForegroundColor DarkGray
+    Write-Host ""
+
+    Write-Host "  ── 1. Telegram ───────────────────────────" -ForegroundColor Cyan
     Setup-Telegram-Credentials
 
     Write-Host ""
-    Write-Host "  ── Крок 2: Компанія ──" -ForegroundColor Cyan
+    Write-Host "  ── 2. Назва сервера та Telegram-топік ───" -ForegroundColor Cyan
     Setup-Company-Details
 
     Write-Host ""
-    Write-Host "  ── Крок 3: OpenAI ──" -ForegroundColor Cyan
+    Write-Host "  ── 3. Диски та папка бекапів ────────────" -ForegroundColor Cyan
+    Setup-Paths
+
+    Write-Host ""
+    Write-Host "  ── 4. Сервіси 1С / SQL ──────────────────" -ForegroundColor Cyan
+    Setup-Services
+
+    Write-Host ""
+    Write-Host "  ── 5. OpenAI (Enter = пропустити) ───────" -ForegroundColor Cyan
     Setup-OpenAI-Credentials
 }
 
@@ -492,8 +525,17 @@ function Create-Tasks {
 # ─── 2. Setup company ────────────────────────────────────────
 
 function Setup-Company {
-    Show-Header "2. Налаштування компанії"
+    Show-Header "2. Налаштування сервера"
+
+    Write-Host "  ── Компанія / Топік ──" -ForegroundColor Cyan
     Setup-Company-Details
+    Write-Host ""
+    Write-Host "  ── Диски та бекапи ──" -ForegroundColor Cyan
+    Setup-Paths
+    Write-Host ""
+    Write-Host "  ── Сервіси ──" -ForegroundColor Cyan
+    Setup-Services
+
     Write-Info "Перезапустіть моніторинг (пункт 7) для застосування змін"
     Pause-Return
 }
@@ -523,19 +565,32 @@ function Setup-Company-Details {
         $manual = Read-Host "  Введіть TG_TOPIC_ID вручну (або Enter щоб пропустити)"
         if ($manual) { Set-EnvValue "TG_TOPIC_ID" $manual }
     }
+}
 
-    # Папка бекапів
-    Write-Host ""
-    Write-Host "  ── Папка бекапів ──" -ForegroundColor Cyan
-    Write-Host "  Поточна: $(Get-DisplayValue 'BACKUP_PATH' $env)" -ForegroundColor DarkGray
-    Write-Host ""
-    $backupPath = Read-Host "  Повний шлях до папки з ZIP-бекапами"
+function Setup-Paths {
+    $env = Read-Env
 
-    if ($backupPath) {
-        Set-EnvValue "BACKUP_PATH" $backupPath
+    Write-Host "  Поточні диски  : $(Get-DisplayValue 'DISK_PATHS' $env)"   -ForegroundColor DarkGray
+    $disks = Read-Host "  Диски через кому (напр. C:\,D:\) або Enter = пропустити"
+    if ($disks) { Set-EnvValue "DISK_PATHS" $disks }
+
+    Write-Host ""
+    Write-Host "  Папка бекапів  : $(Get-DisplayValue 'BACKUP_PATH' $env)" -ForegroundColor DarkGray
+    $backup = Read-Host "  Шлях до архівів (zip/rar/7z/bak) або Enter = пропустити"
+    if ($backup) {
+        Set-EnvValue "BACKUP_PATH" $backup
         Write-Host ""
-        Test-BackupFolder $backupPath | Out-Null
+        Test-BackupFolder $backup | Out-Null
     }
+}
+
+function Setup-Services {
+    $env = Read-Env
+
+    Write-Host "  Приклад: 1C:Enterprise 8.3 Server Agent,MSSQLSERVER" -ForegroundColor DarkGray
+    Write-Host "  Поточні: $(Get-DisplayValue 'MONITOR_SERVICES' $env)" -ForegroundColor DarkGray
+    $services = Read-Host "  Сервіси через кому або Enter = пропустити"
+    if ($services) { Set-EnvValue "MONITOR_SERVICES" $services }
 }
 
 # ─── 3. Telegram credentials ─────────────────────────────────
@@ -548,13 +603,33 @@ function Setup-Telegram {
 }
 
 function Setup-Telegram-Credentials {
-    Write-Host "  TG_BOT_TOKEN та TG_GROUP_ID будуть зашифровані." -ForegroundColor DarkGray
+    Write-Host "  Підготовка (якщо ще не зроблено):" -ForegroundColor DarkGray
+    Write-Host "    1. @BotFather → /newbot → скопіюйте токен" -ForegroundColor DarkGray
+    Write-Host "    2. Додайте бота до групи як адміністратора" -ForegroundColor DarkGray
+    Write-Host "    3. У групі: Редагувати → Гілки → увімкнути" -ForegroundColor DarkGray
     Write-Host ""
-    $token   = Read-Secret "TG_BOT_TOKEN"
-    $groupId = Read-Secret "TG_GROUP_ID"
 
+    $token = Read-Secret "TG_BOT_TOKEN"
+    if (-not $token) { Write-Err "Токен обов'язковий"; return }
     Set-EnvValue "TG_BOT_TOKEN" (Protect-Value $token)
-    Set-EnvValue "TG_GROUP_ID"  (Protect-Value $groupId)
+
+    # Авто-визначення Group ID
+    Write-Host ""
+    Write-Info "Надішліть будь-яке повідомлення у вашу Telegram групу, потім натисніть Enter..."
+    Read-Host "  [Enter]" | Out-Null
+
+    $groupId = Get-TelegramGroupId $token
+    if ($groupId) {
+        Write-Ok "Групу знайдено автоматично: $groupId"
+        Set-EnvValue "TG_GROUP_ID" (Protect-Value $groupId)
+    } else {
+        Write-Info "Не вдалося визначити автоматично."
+        Write-Host "  Відкрийте у браузері та скопіюйте id:" -ForegroundColor Yellow
+        Write-Host "  https://api.telegram.org/bot<TOKEN>/getUpdates" -ForegroundColor Yellow
+        Write-Host ""
+        $groupId = Read-Secret "TG_GROUP_ID"
+        Set-EnvValue "TG_GROUP_ID" (Protect-Value $groupId)
+    }
 
     Write-Ok "Telegram збережено (зашифровано)"
 }
@@ -568,11 +643,16 @@ function Setup-OpenAI {
 }
 
 function Setup-OpenAI-Credentials {
-    Write-Host "  OPENAI_API_KEY буде зашифрований." -ForegroundColor DarkGray
+    Write-Host "  OPENAI_API_KEY буде зашифрований. Enter = пропустити." -ForegroundColor DarkGray
     Write-Host ""
-    $apiKey = Read-Secret "OPENAI_API_KEY"
-    $env    = Read-Env
-    $model  = Read-Host "  OPENAI_MODEL [$( if ($env['OPENAI_MODEL']) { $env['OPENAI_MODEL'] } else { 'gpt-4o-mini' })]"
+    $apiKey = Read-Secret "OPENAI_API_KEY (Enter = пропустити)"
+    if (-not $apiKey) {
+        Write-Info "OpenAI пропущено — буде використана fallback-логіка алертів"
+        return
+    }
+
+    $env   = Read-Env
+    $model = Read-Host "  OPENAI_MODEL [$( if ($env['OPENAI_MODEL']) { $env['OPENAI_MODEL'] } else { 'gpt-4o-mini' })]"
     if (-not $model) { $model = if ($env["OPENAI_MODEL"]) { $env["OPENAI_MODEL"] } else { "gpt-4o-mini" } }
 
     Set-EnvValue "OPENAI_API_KEY" (Protect-Value $apiKey)
@@ -872,7 +952,7 @@ while ($true) {
     Write-Host "  0. Підготовка сервера  (Python, ExecutionPolicy)" -ForegroundColor Yellow
     Write-Host "  ───────────────────────────────────────────────"  -ForegroundColor DarkGray
     Write-Host "  1. Встановити / Оновити"                          -ForegroundColor White
-    Write-Host "  2. Налаштувати компанію  (назва / топік / бекапи)" -ForegroundColor White
+    Write-Host "  2. Налаштувати сервер  (назва / топік / диски)"    -ForegroundColor White
     Write-Host "  3. Переналаштувати Telegram  (токен / група)"     -ForegroundColor White
     Write-Host "  4. Переналаштувати OpenAI"                        -ForegroundColor White
     Write-Host "  5. Переглянути налаштування"                      -ForegroundColor White

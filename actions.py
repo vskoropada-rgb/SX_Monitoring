@@ -200,20 +200,8 @@ def unblock_ip(ip: str) -> Tuple[bool, str]:
 def list_blocked_ips() -> List[str]:
     """Повертає список IP заблокованих через цей моніторинг"""
     try:
-        ps_cmd = (
-            f"Get-NetFirewallRule -DisplayName '{_FW_RULE_PREFIX}*' "
-            "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty DisplayName"
-        )
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
-            capture_output=True, text=True, timeout=10
-        )
-        ips = []
-        for line in result.stdout.splitlines():
-            name = line.strip()
-            if name.startswith(_FW_RULE_PREFIX):
-                ips.append(name[len(_FW_RULE_PREFIX):])
-        return ips
+        import storage as _storage
+        return sorted(_storage.get_blocked_ips())
     except Exception:
         return []
 

@@ -11,11 +11,11 @@ $EnvFile    = Join-Path $ScriptDir ".env"
 $EnvExample = Join-Path $ScriptDir ".env.example"
 $ReqFile    = Join-Path $ScriptDir "requirements.txt"
 
-# Python 3.9 — остання версія з підтримкою Windows 2008 R2 / Server 2012
-$PY_VERSION     = "3.9.13"
+# Python 3.8 — остання версія з підтримкою Windows 2008 R2
+$PY_VERSION     = "3.8.20"
 $PY_URL         = "https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-amd64.exe"
 $PY_MIN_MAJOR   = 3
-$PY_MIN_MINOR   = 10
+$PY_MIN_MINOR   = 8
 
 # ─── Admin check ─────────────────────────────────────────────
 
@@ -276,6 +276,28 @@ function Test-BackupFolder {
     return $true
 }
 
+# ─── TLS 1.2 ─────────────────────────────────────────────────
+
+function Enable-Tls12 {
+    Write-Info "Увімкнення TLS 1.2 у реєстрі..."
+    $tlsBase = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols"
+    foreach ($side in @("Client", "Server")) {
+        $key = "$tlsBase\TLS 1.2\$side"
+        if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+        Set-ItemProperty -Path $key -Name "Enabled"           -Value 1 -Type DWord -Force
+        Set-ItemProperty -Path $key -Name "DisabledByDefault" -Value 0 -Type DWord -Force
+    }
+    # .NET strong crypto — потрібно щоб pip, requests та openai використовували TLS 1.2
+    foreach ($dotnet in @(
+        "HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319",
+        "HKLM:\SOFTWARE\Wow6432Node\Microsoft\.NETFramework\v4.0.30319"
+    )) {
+        if (-not (Test-Path $dotnet)) { New-Item -Path $dotnet -Force | Out-Null }
+        Set-ItemProperty -Path $dotnet -Name "SchUseStrongCrypto" -Value 1 -Type DWord -Force
+    }
+    Write-Ok "TLS 1.2 увімкнено (потрібне перезавантаження для повного застосування)"
+}
+
 # ─── 0. Prepare server ──────────────────────────────────────
 
 function Prepare-Server {
@@ -305,6 +327,10 @@ function Prepare-Server {
     } else {
         Write-Ok "ExecutionPolicy: $policy"
     }
+    Write-Host ""
+
+    # TLS 1.2 — критично для Windows 2008 R2 (Telegram, OpenAI, pip)
+    Enable-Tls12
     Write-Host ""
 
     # Python — перевірка

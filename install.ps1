@@ -16,7 +16,7 @@ $ErrorActionPreference = "SilentlyContinue"
 [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
 $REPO_RAW    = "https://raw.githubusercontent.com/vskoropada-rgb/SX_Monitoring/main"
-$DEFAULT_DIR = "D:\1c_monitor"
+$DEFAULT_DIR = "D:\setup\monitoring-sc"
 
 $FILES = @(
     "main.py", "monitor.py", "bot.py", "config.py",
@@ -69,10 +69,10 @@ if ($psVer -lt 3) {
 $INSTALL_DIR = $DEFAULT_DIR
 
 if (-not (Test-Path "D:\")) {
-    $ans = Read-Host "  D:\ not found. Use C:\1c_monitor? (Y/n)"
+    $ans = Read-Host "  D:\ not found. Use C:\setup\monitoring-sc? (Y/n)"
     $INSTALL_DIR = if ($ans -eq "n" -or $ans -eq "N") {
         Read-Host "  Enter install path"
-    } else { "C:\1c_monitor" }
+    } else { "C:\setup\monitoring-sc" }
     if (-not $INSTALL_DIR) { exit 1 }
 }
 

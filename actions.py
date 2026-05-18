@@ -155,6 +155,8 @@ def block_ip(ip: str) -> tuple[bool, str]:
             capture_output=True, text=True, encoding="cp866"
         )
         if result.returncode == 0:
+            import storage
+            storage.record_blocked_ip(ip)
             logger.info("IP %s заблоковано у Firewall", ip)
             return True, f"IP {ip} заблоковано у Windows Firewall"
         return False, f"Помилка: {(result.stdout + result.stderr).strip()}"
@@ -172,6 +174,8 @@ def unblock_ip(ip: str) -> tuple[bool, str]:
             capture_output=True, text=True, encoding="cp866"
         )
         if result.returncode == 0:
+            import storage
+            storage.remove_blocked_ip(ip)
             logger.info("Блокування IP %s знято", ip)
             return True, f"IP {ip} розблоковано"
         return False, f"Помилка: {(result.stdout + result.stderr).strip()}"

@@ -100,6 +100,11 @@ def init_db():
             task_name  TEXT PRIMARY KEY,
             first_seen DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+        -- Заблоковані IP (через Telegram бот → Windows Firewall)
+        CREATE TABLE IF NOT EXISTS blocked_ips (
+            ip         TEXT PRIMARY KEY,
+            blocked_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         """)
 
 
@@ -337,6 +342,24 @@ def register_task(task_name: str):
         conn.execute(
             "INSERT OR IGNORE INTO known_tasks (task_name) VALUES (?)", (task_name,)
         )
+
+
+# ─── Blocked IPs ─────────────────────────────────────────────
+
+def record_blocked_ip(ip: str):
+    with get_conn() as conn:
+        conn.execute("INSERT OR IGNORE INTO blocked_ips (ip) VALUES (?)", (ip,))
+
+
+def remove_blocked_ip(ip: str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM blocked_ips WHERE ip = ?", (ip,))
+
+
+def get_blocked_ips() -> set:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT ip FROM blocked_ips").fetchall()
+        return {r["ip"] for r in rows}
 
 
 # ─── Cleanup ─────────────────────────────────────────────────

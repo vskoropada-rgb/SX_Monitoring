@@ -1,11 +1,20 @@
-﻿# install.ps1 — bootstrap-встановлення 1C Monitor
+# install.ps1 — bootstrap-встановлення 1C Monitor
 #
-# Запуск (PowerShell від Адміністратора):
+# PowerShell 2.0 (Windows 2008 R2):
+#   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+#   (New-Object Net.WebClient).DownloadString("https://raw.githubusercontent.com/vskoropada-rgb/SX_Monitoring/main/install.ps1") | iex
+#
+# PowerShell 3.0+:
 #   irm "https://raw.githubusercontent.com/vskoropada-rgb/SX_Monitoring/main/install.ps1" | iex
 
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# Примусово TLS 1.2 — потрібно для GitHub на старих ОС
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "SilentlyContinue"
+
+# Встановлюємо UTF-8 тільки якщо консоль підтримує
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
 $DEFAULT_DIR = "D:\setup\monitoring-sc"
 $REPO_RAW    = "https://raw.githubusercontent.com/vskoropada-rgb/SX_Monitoring/main"
@@ -34,6 +43,24 @@ Write-Host "  ╔═════════════════════
 Write-Host "  ║  1C Monitor — Bootstrap встановлення        ║" -ForegroundColor Cyan
 Write-Host "  ╚══════════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
+
+# ─── Перевірка версії PowerShell ─────────────────────────────
+
+$psVer = $PSVersionTable.PSVersion.Major
+if ($psVer -lt 3) {
+    Write-Host ""
+    Write-Host "  PowerShell $psVer виявлено (Windows 2008 R2?)." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Для роботи manage.ps1 потрібен PowerShell 5.1." -ForegroundColor Yellow
+    Write-Host "  Завантажте Windows Management Framework 5.1:" -ForegroundColor White
+    Write-Host "  https://www.microsoft.com/download/details.aspx?id=54616" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Після встановлення WMF 5.1 та перезавантаження" -ForegroundColor White
+    Write-Host "  запустіть install.ps1 знову." -ForegroundColor White
+    Write-Host ""
+    Read-Host "  Натисніть Enter"
+    exit 1
+}
 
 # ─── Admin check ─────────────────────────────────────────────
 
@@ -84,7 +111,9 @@ Write-Host ""
 Write-Info "Завантаження файлів з GitHub..."
 Write-Host ""
 
-$ProgressPreference = "SilentlyContinue"
+$wc = New-Object System.Net.WebClient
+$wc.Encoding = [System.Text.Encoding]::UTF8
+
 $countOk = 0; $countFail = 0
 
 foreach ($file in $FILES) {
@@ -92,8 +121,8 @@ foreach ($file in $FILES) {
     $dest = Join-Path $INSTALL_DIR $file
 
     try {
-        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
-        # Add UTF-8 BOM to .ps1 files so PowerShell 5.x reads them as UTF-8
+        $wc.DownloadFile($url, $dest)
+        # Додаємо UTF-8 BOM до .ps1 щоб PowerShell 5.x читав як UTF-8
         if ($file.EndsWith('.ps1')) {
             $bytes = [System.IO.File]::ReadAllBytes($dest)
             $bom   = [byte[]](0xEF, 0xBB, 0xBF)
@@ -108,8 +137,6 @@ foreach ($file in $FILES) {
         $countFail++
     }
 }
-
-$ProgressPreference = "Continue"
 
 Write-Host ""
 if ($countFail -eq 0) {

@@ -1,8 +1,9 @@
 ﻿# manage.ps1 - 1C Monitor Management Script
 # Run as Administrator: Right-click -> "Run with PowerShell" (as Admin)
 
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $OutputEncoding = [System.Text.Encoding]::UTF8
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 $ErrorActionPreference = "SilentlyContinue"
 
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -10,7 +11,8 @@ $EnvFile    = Join-Path $ScriptDir ".env"
 $EnvExample = Join-Path $ScriptDir ".env.example"
 $ReqFile    = Join-Path $ScriptDir "requirements.txt"
 
-$PY_VERSION     = "3.12.9"
+# Python 3.9 — остання версія з підтримкою Windows 2008 R2 / Server 2012
+$PY_VERSION     = "3.9.13"
 $PY_URL         = "https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-amd64.exe"
 $PY_MIN_MAJOR   = 3
 $PY_MIN_MINOR   = 10
@@ -280,7 +282,7 @@ function Prepare-Server {
     Show-Header "0. Підготовка сервера"
 
     # Системна інформація
-    $os   = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $os   = (Get-WmiObject Win32_OperatingSystem -ErrorAction SilentlyContinue)
     $arch = if ([Environment]::Is64BitOperatingSystem) { "64-bit" } else { "32-bit" }
     $ram  = if ($os) { "$([math]::Round($os.TotalVisibleMemorySize/1MB, 1)) GB" } else { "?" }
 
@@ -860,7 +862,7 @@ function Restart-Monitor {
     Show-Header "7. Перезапуск моніторингу"
 
     Write-Step "Зупинка процесу моніторингу..."
-    Get-CimInstance Win32_Process |
+    Get-WmiObject Win32_Process |
         Where-Object { $_.CommandLine -match "main\.py" } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Write-Ok "Процеси зупинені"
@@ -892,7 +894,7 @@ function Uninstall-Monitor {
     }
 
     Write-Step "Зупинка Python процесів..."
-    Get-CimInstance Win32_Process |
+    Get-WmiObject Win32_Process |
         Where-Object { $_.CommandLine -match "main\.py" } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Write-Ok "Python процеси зупинені"

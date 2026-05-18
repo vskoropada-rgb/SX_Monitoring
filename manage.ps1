@@ -378,9 +378,11 @@ function Install-Python {
     Write-Info "Розмір: ~25 MB, може зайняти кілька хвилин..."
 
     try {
-        $ProgressPreference = "SilentlyContinue"
-        Invoke-WebRequest -Uri $PY_URL -OutFile $tmpExe -ErrorAction Stop
-        $ProgressPreference = "Continue"
+        # Net.WebClient з TLS 1.2 і bypass SSL — потрібно для 2008 R2
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+        $wc = New-Object System.Net.WebClient
+        $wc.DownloadFile($PY_URL, $tmpExe)
         $sizeMB = [math]::Round((Get-Item $tmpExe).Length / 1MB, 1)
         Write-Ok "Завантажено ($sizeMB MB)"
     } catch {

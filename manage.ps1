@@ -462,27 +462,38 @@ function Install-Monitor {
 }
 
 function Setup-FirstRun {
-    Write-Host "  Кроки: Telegram → Сервер → Диски → Сервіси → OpenAI (опція)" -ForegroundColor DarkGray
-    Write-Host ""
-
-    Write-Host "  ── 1. Telegram ───────────────────────────" -ForegroundColor Cyan
-    Setup-Telegram-Credentials
-
-    Write-Host ""
-    Write-Host "  ── 2. Назва сервера та Telegram-топік ───" -ForegroundColor Cyan
-    Setup-Company-Details
-
-    Write-Host ""
-    Write-Host "  ── 3. Диски та папка бекапів ────────────" -ForegroundColor Cyan
-    Setup-Paths
-
-    Write-Host ""
-    Write-Host "  ── 4. Сервіси 1С / SQL ──────────────────" -ForegroundColor Cyan
-    Setup-Services
-
-    Write-Host ""
-    Write-Host "  ── 5. OpenAI (Enter = пропустити) ───────" -ForegroundColor Cyan
-    Setup-OpenAI-Credentials
+    # Якщо поруч є .env.base — імпортуємо токени без ручного введення
+    $imported = Import-BaseConfig
+    if ($imported) {
+        Write-Host "  Кроки: Сервер → Диски → Сервіси" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "  ── 1. Назва сервера та Telegram-топік ───" -ForegroundColor Cyan
+        Setup-Company-Details
+        Write-Host ""
+        Write-Host "  ── 2. Диски та папка бекапів ────────────" -ForegroundColor Cyan
+        Setup-Paths
+        Write-Host ""
+        Write-Host "  ── 3. Сервіси 1С / SQL ──────────────────" -ForegroundColor Cyan
+        Setup-Services
+    } else {
+        Write-Host "  Кроки: Telegram → Сервер → Диски → Сервіси → OpenAI (опція)" -ForegroundColor DarkGray
+        Write-Host "  Підказка: скопіюйте .env.base з іншого сервера щоб пропустити кроки Telegram/OpenAI" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "  ── 1. Telegram ───────────────────────────" -ForegroundColor Cyan
+        Setup-Telegram-Credentials
+        Write-Host ""
+        Write-Host "  ── 2. Назва сервера та Telegram-топік ───" -ForegroundColor Cyan
+        Setup-Company-Details
+        Write-Host ""
+        Write-Host "  ── 3. Диски та папка бекапів ────────────" -ForegroundColor Cyan
+        Setup-Paths
+        Write-Host ""
+        Write-Host "  ── 4. Сервіси 1С / SQL ──────────────────" -ForegroundColor Cyan
+        Setup-Services
+        Write-Host ""
+        Write-Host "  ── 5. OpenAI (Enter = пропустити) ───────" -ForegroundColor Cyan
+        Setup-OpenAI-Credentials
+    }
 }
 
 function Create-Tasks {
@@ -591,6 +602,72 @@ function Setup-Services {
     Write-Host "  Поточні: $(Get-DisplayValue 'MONITOR_SERVICES' $env)" -ForegroundColor DarkGray
     $services = Read-Host "  Сервіси через кому або Enter = пропустити"
     if ($services) { Set-EnvValue "MONITOR_SERVICES" $services }
+}
+
+# ─── B. Base config export / import ─────────────────────────
+
+function Export-BaseConfig {
+    Show-Header "B. Експорт базового конфігу"
+
+    $env = Read-Env
+    $token   = Unprotect-Value $env["TG_BOT_TOKEN"]
+    $groupId = Unprotect-Value $env["TG_GROUP_ID"]
+    $apiKey  = Unprotect-Value $env["OPENAI_API_KEY"]
+    $model   = $env["OPENAI_MODEL"]
+
+    if (-not $token -or -not $groupId) {
+        Write-Err "TG_BOT_TOKEN або TG_GROUP_ID не налаштовані — спочатку виконайте пункт 3"
+        Pause-Return; return
+    }
+
+    $basePath = Join-Path $ScriptDir ".env.base"
+    @"
+TG_BOT_TOKEN=$token
+TG_GROUP_ID=$groupId
+OPENAI_API_KEY=$apiKey
+OPENAI_MODEL=$( if ($model) { $model } else { "gpt-4o-mini" } )
+"@ | Set-Content $basePath -Encoding UTF8
+
+    Write-Ok "Файл збережено: $basePath"
+    Write-Host ""
+    Write-Host "  Скопіюйте цей файл на новий сервер поруч з manage.ps1" -ForegroundColor Yellow
+    Write-Host "  При першому запуску manage.ps1 токени підтягнуться автоматично" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  ! Файл містить токени у відкритому вигляді — зберігайте обережно" -ForegroundColor Red
+    Pause-Return
+}
+
+function Import-BaseConfig {
+    param([string]$Path = "")
+    if (-not $Path) { $Path = Join-Path $ScriptDir ".env.base" }
+
+    if (-not (Test-Path $Path)) { return $false }
+
+    $lines = Get-Content $Path -Encoding UTF8 -ErrorAction SilentlyContinue
+    $base  = @{}
+    foreach ($line in $lines) {
+        if ($line -match "^([A-Za-z_][A-Za-z0-9_]*)=(.+)$") {
+            $base[$matches[1]] = $matches[2]
+        }
+    }
+
+    $token   = $base["TG_BOT_TOKEN"]
+    $groupId = $base["TG_GROUP_ID"]
+
+    if (-not $token -or -not $groupId) { return $false }
+
+    Write-Ok "Знайдено .env.base — імпортую спільні токени..."
+    Set-EnvValue "TG_BOT_TOKEN" (Protect-Value $token)
+    Set-EnvValue "TG_GROUP_ID"  (Protect-Value $groupId)
+
+    if ($base["OPENAI_API_KEY"]) {
+        Set-EnvValue "OPENAI_API_KEY" (Protect-Value $base["OPENAI_API_KEY"])
+    }
+    $model = if ($base["OPENAI_MODEL"]) { $base["OPENAI_MODEL"] } else { "gpt-4o-mini" }
+    Set-EnvValue "OPENAI_MODEL" $model
+
+    Write-Ok "Токени імпортовано та зашифровано"
+    return $true
 }
 
 # ─── 3. Telegram credentials ─────────────────────────────────
@@ -962,6 +1039,7 @@ while ($true) {
     Write-Host "  ───────────────────────────────────────────────"  -ForegroundColor DarkGray
     Write-Host "  9. Тест Telegram  (перевірка надсилання)"         -ForegroundColor Cyan
     Write-Host "  U. Оновлення з GitHub"                            -ForegroundColor Cyan
+    Write-Host "  B. Базовий конфіг  (Export токенів для нових серверів)" -ForegroundColor Cyan
     Write-Host "  Q. Вийти"                                         -ForegroundColor DarkGray
     Write-Host ""
 
@@ -978,6 +1056,7 @@ while ($true) {
         "8" { Uninstall-Monitor   }
         "9" { Test-Telegram       }
         "U" { Update-FromGitHub   }
+        "B" { Export-BaseConfig   }
         "Q" { exit                }
         default {
             Write-Host "  Невірний вибір." -ForegroundColor Red

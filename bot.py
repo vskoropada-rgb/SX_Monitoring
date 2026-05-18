@@ -147,21 +147,21 @@ def handle_sessions(message_id=None):
         return
 
     lines = [f"👥 <b>Активні сесії — {COMPANY}</b>", ""]
-    buttons = []
-
-    for i, s in enumerate(sessions):
-        state_icon = "🟢" if s.get("state") in ("Active", "Activ") else "🟡"
-        lines.append(f"{state_icon} <b>{s.get('username', '?')}</b> | ID: {s.get('session_id')} | {s.get('state')}")
-        buttons.append({"text": f"❌ Вибити {s.get('username', s.get('session_id'))}", "callback_data": f"kick_{s.get('session_id')}_{SERVER_ID}"})
-
     keyboard = []
-    # По 2 кнопки в ряд
-    for i in range(0, len(buttons), 2):
-        keyboard.append(buttons[i:i+2])
+
+    for s in sessions:
+        state_icon = "🟢" if s.get("state") in ("Active", "Activ") else "🟡"
+        user = s.get("username") or s.get("session_name", "?")
+        sid  = s.get("session_id", "")
+        lines.append(f"{state_icon} <b>{user}</b>  ({s.get('state', '')})")
+        keyboard.append([{
+            "text": f"🚪 Завершити {user}",
+            "callback_data": f"kick_{sid}_{SERVER_ID}",
+        }])
 
     keyboard.append([
-        {"text": "❌ Вибити всіх", "callback_data": f"kick_all_{SERVER_ID}"},
-        {"text": "🔙 Назад", "callback_data": f"status_{SERVER_ID}"},
+        {"text": "🚪 Завершити всіх", "callback_data": f"kick_all_{SERVER_ID}"},
+        {"text": "🔙 Назад",          "callback_data": f"status_{SERVER_ID}"},
     ])
 
     send("\n".join(lines), keyboard, message_id)

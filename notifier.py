@@ -26,35 +26,21 @@ def send_alert(decision: dict, metrics: dict, config: dict) -> bool:
         return False
 
     icon = SEVERITY_ICONS.get(decision.get("severity", "info"), "ℹ️")
-    tags = " ".join(decision.get("tags", []))
+    tags_list = decision.get("tags", [])
     title = decision.get("title", "Подія на сервері")
     analysis = decision.get("analysis", "")
-    recommendation = decision.get("recommendation", "")
-    now = datetime.now().strftime("%H:%M %d.%m.%Y")
+    now = datetime.now().strftime("%H:%M")
 
-    # Формуємо повідомлення
-    lines = [
-        f"{icon} <b>[{company}]</b> {now}",
-        f"{tags}",
-        "",
-        f"<b>{title}</b>",
-    ]
+    lines = [f"{icon} <b>{title}</b>  {now}"]
 
     if analysis:
-        lines.append("")
-        lines.append(f"📋 {analysis}")
+        lines.append(analysis)
 
-    if recommendation:
-        lines.append("")
-        lines.append(f"⚡ <b>Рекомендація:</b> {recommendation}")
-
-    # Метрики — не додаємо якщо алерт про безпеку/IP (вже є в тексті аналізу)
-    tags = decision.get("tags", [])
-    is_security_alert = any(t in tags for t in ("#brute_force", "#new_ip", "#admin", "#files"))
-    if not is_security_alert:
+    # Метрики — тільки для не-security алертів, коротко
+    is_security = any(t in tags_list for t in ("#brute_force", "#new_ip", "#admin", "#files"))
+    if not is_security:
         metrics_block = _format_metrics_block(metrics)
         if metrics_block:
-            lines.append("")
             lines.append(metrics_block)
 
     text = "\n".join(lines)
@@ -74,25 +60,21 @@ def send_message(text: str, config: dict, keyboard=None) -> bool:
 
 
 def _format_metrics_block(metrics: dict) -> str:
-    lines = ["📊 <b>Метрики:</b>"]
+    parts = []
 
-    if "disks" in metrics:
-        for d in metrics["disks"]:
-            if "free_pct" in d:
-                delta = f" ↓{abs(d['delta_1h']):.1f}%/г" if d.get("delta_1h") and d["delta_1h"] < 0 else ""
-                lines.append(f"• Диск {d['path']}: {d['free_pct']}% вільно ({d['free_gb']}GB){delta}")
+    for d in metrics.get("disks", []):
+        if "free_pct" in d:
+            delta = f" ↓{abs(d['delta_1h']):.1f}%/г" if d.get("delta_1h") and d["delta_1h"] < 0 else ""
+            parts.append(f"💾 {d['path']} {d['free_pct']}% ({d['free_gb']}GB){delta}")
 
     if "cpu" in metrics:
-        lines.append(f"• CPU: {metrics['cpu']['percent']}% | RAM: {metrics['ram']['percent']}%")
+        parts.append(f"CPU {metrics['cpu']['percent']}% · RAM {metrics['ram']['percent']}%")
 
-    if "services" in metrics:
-        for svc in metrics["services"]:
-            icon = "✅" if svc["is_running"] else "❌"
-            lines.append(f"• {icon} {svc['name']}")
+    stopped = [s["name"] for s in metrics.get("services", []) if not s["is_running"]]
+    if stopped:
+        parts.append("❌ " + ", ".join(stopped))
 
-    if len(lines) == 1:
-        return ""
-    return "\n".join(lines)
+    return "\n".join(parts)
 
 
 def _extract_block_ips(decision: dict, metrics: dict) -> list[str]:

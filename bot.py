@@ -14,6 +14,7 @@ _cfg = _config_module.load()
 import requests
 import json
 import time
+import threading
 from datetime import datetime
 
 import storage
@@ -32,11 +33,13 @@ DISK_PATHS = [p.strip() for p in _cfg.get("DISK_PATHS", "C:\\").split(",")]
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Стан: очікування підтвердження
-pending_confirmations = {}
-
 # Тред де була написана команда — відповідаємо туди ж, не в TOPIC_ID
 _reply_thread_id: int | None = None
+
+# Кеш сесій — subprocess qwinsta дорогий, кешуємо на 30с
+_sessions_cache: list = []
+_sessions_cache_ts: float = 0.0
+_SESSIONS_TTL = 30
 
 
 def api_call(method: str, data: dict) -> dict:
@@ -75,6 +78,21 @@ def send(text: str, keyboard=None, message_id: int = None):
 def send_photo(image_path: str, caption: str):
     config = {"TG_BOT_TOKEN": BOT_TOKEN, "TG_GROUP_ID": GROUP_ID, "TG_TOPIC_ID": TOPIC_ID}
     notifier.send_photo(image_path, caption, config)
+
+
+def _get_sessions() -> list:
+    """qwinsta з кешем 30с — не гальмує бот при кожному натисканні"""
+    global _sessions_cache, _sessions_cache_ts
+    now = time.monotonic()
+    if now - _sessions_cache_ts > _SESSIONS_TTL:
+        _sessions_cache = actions.get_sessions()
+        _sessions_cache_ts = now
+    return _sessions_cache
+
+
+def _invalidate_sessions_cache():
+    global _sessions_cache_ts
+    _sessions_cache_ts = 0.0
 
 
 # ─── Обробники команд ────────────────────────────────────────
@@ -138,7 +156,7 @@ def handle_status(message_id=None):
 
 
 def handle_sessions(message_id=None):
-    sessions = actions.get_sessions()
+    sessions = _get_sessions()
 
     if not sessions:
         text = f"👥 <b>Сесії — {COMPANY}</b>\n\nАктивних сесій немає"
@@ -236,7 +254,7 @@ def handle_chart(hours: int, metric: str = "combined", message_id=None):
 
 
 def handle_reboot_confirm(message_id=None):
-    sessions = actions.get_sessions()
+    sessions = _get_sessions()
     session_count = len(sessions)
 
     warn = f"\n⚠️ Є <b>{session_count}</b> активних сесій!" if session_count > 0 else ""
@@ -280,10 +298,9 @@ def handle_backup_chart(message_id=None):
 
 def handle_kick(session_id: str, message_id=None):
     ok, msg = actions.kick_session(session_id)
+    _invalidate_sessions_cache()
     icon = "✅" if ok else "❌"
-    text = f"{icon} {msg}"
-    time.sleep(1)
-    handle_sessions(message_id)
+    send(f"{icon} {msg}", [[{"text": "🔄 Оновити список", "callback_data": f"sessions_{SERVER_ID}"}]], message_id)
 
 
 def handle_kick_all(message_id=None):
@@ -365,14 +382,8 @@ def handle_unblock_do(ip: str, message_id=None):
 
 # ─── Dispatcher ─────────────────────────────────────────────
 
-def process_callback(query: dict):
-    data = query.get("data", "")
-    callback_id = query.get("id")
-    message_id = query.get("message", {}).get("message_id")
-
-    answer_callback(callback_id)
-    logger.info(f"Callback: {data}")
-
+def _dispatch_callback(data: str, message_id: int | None):
+    """Виконується в окремому потоці — не блокує polling loop"""
     if data.startswith("status_"):
         handle_status(message_id)
     elif data.startswith("sessions_"):
@@ -424,6 +435,23 @@ def process_callback(query: dict):
         handle_unblock_confirm(data[len("unblock_confirm_"):], message_id)
     elif data.startswith("unblock_do_"):
         handle_unblock_do(data[len("unblock_do_"):], message_id)
+
+
+def process_callback(query: dict):
+    data        = query.get("data", "")
+    callback_id = query.get("id")
+    message_id  = query.get("message", {}).get("message_id")
+
+    # Підтверджуємо натискання кнопки ОДРАЗУ — прибирає spinning indicator
+    answer_callback(callback_id)
+    logger.info(f"Callback: {data}")
+
+    # Обробляємо в окремому потоці — бот не чекає і одразу готовий до наступного
+    threading.Thread(
+        target=_dispatch_callback,
+        args=(data, message_id),
+        daemon=True,
+    ).start()
 
 
 def process_message(message: dict):

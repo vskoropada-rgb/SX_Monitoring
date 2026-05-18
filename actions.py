@@ -1,11 +1,13 @@
 """
-actions.py — дії на сервері: завершення сесій, перезапуск сервісів, перезавантаження
+actions.py — дії на сервері: завершення сесій, перезапуск сервісів, перезавантаження, firewall
 """
 import subprocess
 import logging
 import psutil
 
 logger = logging.getLogger(__name__)
+
+_FW_RULE_PREFIX = "1C_Monitor_Block_"
 
 
 def get_sessions() -> list:
@@ -140,6 +142,66 @@ def cancel_reboot() -> tuple[bool, str]:
         return True, "Перезавантаження скасовано"
     except Exception as e:
         return False, str(e)
+
+
+def block_ip(ip: str) -> tuple[bool, str]:
+    """Блокує вхідні з'єднання з IP через Windows Firewall"""
+    rule_name = f"{_FW_RULE_PREFIX}{ip}"
+    try:
+        result = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "add", "rule",
+             f"name={rule_name}", "dir=in", "action=block",
+             f"remoteip={ip}", "protocol=any", "enable=yes"],
+            capture_output=True, text=True, encoding="cp866"
+        )
+        if result.returncode == 0:
+            import storage
+            storage.record_blocked_ip(ip)
+            logger.info("IP %s заблоковано у Firewall", ip)
+            return True, f"IP {ip} заблоковано у Windows Firewall"
+        return False, f"Помилка: {(result.stdout + result.stderr).strip()}"
+    except Exception as e:
+        return False, str(e)
+
+
+def unblock_ip(ip: str) -> tuple[bool, str]:
+    """Знімає блокування IP з Windows Firewall"""
+    rule_name = f"{_FW_RULE_PREFIX}{ip}"
+    try:
+        result = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "delete", "rule",
+             f"name={rule_name}"],
+            capture_output=True, text=True, encoding="cp866"
+        )
+        if result.returncode == 0:
+            import storage
+            storage.remove_blocked_ip(ip)
+            logger.info("Блокування IP %s знято", ip)
+            return True, f"IP {ip} розблоковано"
+        return False, f"Помилка: {(result.stdout + result.stderr).strip()}"
+    except Exception as e:
+        return False, str(e)
+
+
+def list_blocked_ips() -> list[str]:
+    """Повертає список IP заблокованих через цей моніторинг"""
+    try:
+        ps_cmd = (
+            f"Get-NetFirewallRule -DisplayName '{_FW_RULE_PREFIX}*' "
+            "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty DisplayName"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=10
+        )
+        ips = []
+        for line in result.stdout.splitlines():
+            name = line.strip()
+            if name.startswith(_FW_RULE_PREFIX):
+                ips.append(name[len(_FW_RULE_PREFIX):])
+        return ips
+    except Exception:
+        return []
 
 
 def get_disk_details(paths: list) -> str:

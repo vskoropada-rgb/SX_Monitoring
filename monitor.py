@@ -142,6 +142,25 @@ def run():
     except Exception as e:
         logger.error("Помилка щоденного звіту: %s", e)
 
+    # ── Кеш для швидкого відображення в боті ─────────────────
+    try:
+        storage.cache_metrics(all_metrics)
+    except Exception:
+        pass
+
+    # ── Фільтр: не алертити по вже заблокованих IP ───────────
+    if all_metrics.get("brute_force_alerts"):
+        blocked = storage.get_blocked_ips()
+        if blocked:
+            before = len(all_metrics["brute_force_alerts"])
+            all_metrics["brute_force_alerts"] = [
+                a for a in all_metrics["brute_force_alerts"]
+                if a["ip"] not in blocked
+            ]
+            filtered = before - len(all_metrics["brute_force_alerts"])
+            if filtered:
+                logger.info("Відфільтровано %d вже заблокованих IP", filtered)
+
     # ── Аналіз і відправка алертів ────────────────────────────
     if not maintenance:
         cooldown = int(config.get("ALERT_COOLDOWN_MIN", 30))

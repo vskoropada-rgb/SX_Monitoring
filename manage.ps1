@@ -540,7 +540,8 @@ function Show-Config {
         @{K="BACKUP_PATH";          L="Папка бекапів"   },
         @{K="BACKUP_MAX_AGE_HOURS"; L="Макс. вік (год)" },
         @{K="BACKUP_MIN_SIZE_MB";   L="Мін. розмір (MB)"},
-        @{K="ALERT_COOLDOWN_MIN";   L="Кулдаун (хв)"   }
+        @{K="ALERT_COOLDOWN_MIN";   L="Кулдаун (хв)"   },
+        @{K="GH_TOKEN";             L="GitHub PAT"      }
     )
 
     foreach ($f in $fields) {
@@ -720,17 +721,39 @@ function Update-FromGitHub {
         "collectors/software.py", "collectors/schtasks.py"
     )
 
+    # ── GitHub токен ─────────────────────────────────────────
+    $env    = Read-Env
+    $ghToken = Unprotect-Value $env["GH_TOKEN"]
+    if (-not $ghToken) { $ghToken = $env:GH_TOKEN }
+    if (-not $ghToken) {
+        Write-Info "GitHub PAT не знайдено в .env"
+        Write-Host "  Отримати: https://github.com/settings/tokens  (Contents = Read-only)" -ForegroundColor DarkGray
+        Write-Host ""
+        $ghToken = Read-Host "  Введіть GitHub PAT (або Enter для пропуску)"
+    }
+    $authHeader = if ($ghToken) { @{ Authorization = "token $ghToken" } } else { @{} }
+
+    # ── Перевірка доступу ────────────────────────────────────
     Write-Step "Перевірка підключення до GitHub..."
     try {
         Invoke-WebRequest -Uri "$REPO_RAW/main.py" -Method Head `
-            -UseBasicParsing -ErrorAction Stop | Out-Null
+            -Headers $authHeader -UseBasicParsing -ErrorAction Stop | Out-Null
         Write-Ok "GitHub доступний"
     } catch {
-        Write-Err "Не вдалося підключитися до GitHub: $_"
+        Write-Err "Не вдалося підключитися: $_"
         Pause-Return; return
     }
 
-    # Резервна копія перед оновленням
+    # ── Зберегти токен якщо новий ────────────────────────────
+    if ($ghToken -and -not $env["GH_TOKEN"]) {
+        $ans = Read-Host "  Зберегти токен зашифровано в .env? (Y/n)"
+        if ($ans -ne "n" -and $ans -ne "N") {
+            Set-EnvValue "GH_TOKEN" (Protect-Value $ghToken)
+            Write-Ok "Токен збережено"
+        }
+    }
+
+    # ── Резервна копія перед оновленням ──────────────────────
     $backupDir = Join-Path $ScriptDir ".backup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
     Write-Step "Резервна копія → $backupDir"
     try {
@@ -745,12 +768,13 @@ function Update-FromGitHub {
         Write-Err "Помилка резервної копії: $_"
     }
 
-    # Завантаження файлів
+    # ── Завантаження файлів ──────────────────────────────────
+    Write-Host ""
     $updated = 0; $skipped = 0
     $ProgressPreference = "SilentlyContinue"
 
     foreach ($file in $files) {
-        $url  = "$REPO_RAW/$file"
+        $url  = "$REPO_RAW/$($file -replace '\\','/')"
         $dest = Join-Path $ScriptDir $file
 
         $destDir = Split-Path $dest -Parent
@@ -759,7 +783,8 @@ function Update-FromGitHub {
         }
 
         try {
-            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+            Invoke-WebRequest -Uri $url -OutFile $dest -Headers $authHeader `
+                -UseBasicParsing -ErrorAction Stop
             Write-Ok $file
             $updated++
         } catch {
@@ -773,7 +798,7 @@ function Update-FromGitHub {
     Write-Host ""
     Write-Ok "Оновлено: $updated  Пропущено: $skipped"
 
-    # Оновити pip-залежності
+    # ── pip-залежності ───────────────────────────────────────
     Write-Host ""
     $ans = Read-Host "  Оновити pip-залежності? (Y/n)"
     if ($ans -ne "n" -and $ans -ne "N") {
@@ -782,7 +807,7 @@ function Update-FromGitHub {
         Write-Ok "Залежності оновлені"
     }
 
-    # Перезапуск
+    # ── Перезапуск ───────────────────────────────────────────
     Write-Host ""
     $ans = Read-Host "  Перезапустити моніторинг? (Y/n)"
     if ($ans -ne "n" -and $ans -ne "N") {

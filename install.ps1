@@ -1,4 +1,4 @@
-# install.ps1 — bootstrap-встановлення 1C Monitor
+﻿# install.ps1 — bootstrap-встановлення 1C Monitor
 #
 # Запуск (PowerShell від Адміністратора):
 #   irm "https://raw.githubusercontent.com/vskoropada-rgb/SX_Monitoring/main/install.ps1" | iex
@@ -93,6 +93,14 @@ foreach ($file in $FILES) {
 
     try {
         Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+        # Add UTF-8 BOM to .ps1 files so PowerShell 5.x reads them as UTF-8
+        if ($file.EndsWith('.ps1')) {
+            $bytes = [System.IO.File]::ReadAllBytes($dest)
+            $bom   = [byte[]](0xEF, 0xBB, 0xBF)
+            if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+                [System.IO.File]::WriteAllBytes($dest, $bom + $bytes)
+            }
+        }
         Write-Host "    OK  $file" -ForegroundColor Green
         $countOk++
     } catch {

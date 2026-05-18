@@ -86,7 +86,7 @@ def handle_status(message_id=None):
     svc_data  = svc_collector.collect(config)
 
     maint_until = storage.get_maintenance_until(SERVER_ID)
-    maint_badge = f"\n🔧 <b>Обслуговування до {maint_until.strftime('%H:%M')})</b>" if maint_until else ""
+    maint_badge = f"\n🔧 <b>Обслуговування до {maint_until.strftime('%H:%M')}</b>" if maint_until else ""
 
     lines = [
         f"📡 <b>Статус — {COMPANY}</b>{maint_badge}",

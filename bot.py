@@ -21,10 +21,6 @@ import actions
 import notifier
 import charts
 
-from collectors import disk as disk_collector
-from collectors import memory as mem_collector
-from collectors import services as svc_collector
-
 logger = logging.getLogger("bot")
 
 BOT_TOKEN  = _cfg["TG_BOT_TOKEN"]
@@ -84,10 +80,7 @@ def send_photo(image_path: str, caption: str):
 # ─── Обробники команд ────────────────────────────────────────
 
 def handle_status(message_id=None):
-    config   = _config()
-    disk_data = disk_collector.collect(config)
-    mem_data  = mem_collector.collect(config)
-    svc_data  = svc_collector.collect(config)
+    m = storage.load_metrics_cache()
 
     maint_until = storage.get_maintenance_until(SERVER_ID)
     maint_badge = f"\n🔧 <b>Обслуговування до {maint_until.strftime('%H:%M')}</b>" if maint_until else ""
@@ -98,18 +91,18 @@ def handle_status(message_id=None):
         "",
     ]
 
-    for d in disk_data.get("disks", []):
+    for d in m.get("disks", []):
         if "free_pct" in d:
             icon = "🔴" if d["free_pct"] < 10 else "⚠️" if d["free_pct"] < 20 else "✅"
-            lines.append(f"{icon} Диск {d['path']}: {d['free_pct']}% вільно ({d['free_gb']}GB)")
+            lines.append(f"{icon} {d['path']}: {d['free_pct']}% вільно ({d['free_gb']}GB)")
 
-    cpu = mem_data.get("cpu", {})
-    ram = mem_data.get("ram", {})
+    cpu = m.get("cpu", {})
+    ram = m.get("ram", {})
     lines.append(f"{'🔴' if cpu.get('percent',0)>85 else '✅'} CPU: {cpu.get('percent','?')}%")
     lines.append(f"{'🔴' if ram.get('percent',0)>90 else '✅'} RAM: {ram.get('percent','?')}% (вільно {ram.get('free_gb','?')}GB)")
 
     lines.append("")
-    for svc in svc_data.get("services", []):
+    for svc in m.get("services", []):
         icon = "✅" if svc["is_running"] else "❌"
         lines.append(f"{icon} {svc['name']}")
 

@@ -105,6 +105,13 @@ def init_db():
             ip         TEXT PRIMARY KEY,
             blocked_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        -- Кеш останніх метрик для швидкого відображення в боті
+        CREATE TABLE IF NOT EXISTS metrics_cache (
+            key        TEXT PRIMARY KEY,
+            data       TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         """)
 
 
@@ -342,6 +349,24 @@ def register_task(task_name: str):
         conn.execute(
             "INSERT OR IGNORE INTO known_tasks (task_name) VALUES (?)", (task_name,)
         )
+
+
+# ─── Metrics cache ───────────────────────────────────────────
+
+def cache_metrics(data: dict):
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO metrics_cache (key, data) VALUES ('last', ?)
+            ON CONFLICT(key) DO UPDATE SET data=excluded.data, updated_at=CURRENT_TIMESTAMP
+        """, (json.dumps(data, default=str),))
+
+
+def load_metrics_cache() -> dict:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT data FROM metrics_cache WHERE key='last'"
+        ).fetchone()
+        return json.loads(row["data"]) if row else {}
 
 
 # ─── Blocked IPs ─────────────────────────────────────────────

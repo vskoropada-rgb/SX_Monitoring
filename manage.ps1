@@ -202,7 +202,7 @@ function Prepare-Server {
     $ram  = if ($os) { "$([math]::Round($os.TotalVisibleMemorySize/1MB, 1)) GB" } else { "?" }
 
     Write-Host "  Комп'ютер : $env:COMPUTERNAME" -ForegroundColor Cyan
-    Write-Host "  ОС        : $($os?.Caption) $arch" -ForegroundColor Cyan
+    Write-Host "  ОС        : $(if ($os) { $os.Caption } else { '?' }) $arch" -ForegroundColor Cyan
     Write-Host "  RAM       : $ram" -ForegroundColor Cyan
     Write-Host "  PS версія : $($PSVersionTable.PSVersion)" -ForegroundColor Cyan
     Write-Host ""
@@ -363,7 +363,8 @@ function Install-Monitor {
     Create-Tasks
 
     Write-Step "Запуск моніторингу..."
-    $python = (Get-Command python -ErrorAction SilentlyContinue)?.Source
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    $python = if ($pythonCmd) { $pythonCmd.Source } else { $null }
     if ($python) {
         Start-Process $python -ArgumentList "`"$ScriptDir\main.py`"" -WindowStyle Hidden
         Write-Ok "Моніторинг запущений"

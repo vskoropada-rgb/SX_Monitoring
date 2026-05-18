@@ -95,32 +95,33 @@ def _format_metrics_block(metrics: dict) -> str:
     return "\n".join(lines)
 
 
-def _extract_alert_ip(decision: dict, metrics: dict) -> str | None:
-    """Витягує IP з метрик або alert_key (будь-який формат GPT)"""
+def _extract_block_ips(decision: dict, metrics: dict) -> list[str]:
+    """Повертає список IP які треба запропонувати заблокувати"""
     tags = decision.get("tags", [])
+    ips = []
 
-    # Найнадійніший спосіб — прямо з метрик
     if "#brute_force" in tags:
         alerts = metrics.get("brute_force_alerts", [])
-        # Беремо невідомий IP з найбільшою кількістю спроб
         unknown = [a for a in alerts if not a.get("is_known_network")]
-        if unknown:
-            return max(unknown, key=lambda a: a["count"])["ip"]
-        if alerts:
-            return max(alerts, key=lambda a: a["count"])["ip"]
+        source = unknown if unknown else alerts
+        # Сортуємо за кількістю спроб, max 3 кнопки
+        for a in sorted(source, key=lambda x: x["count"], reverse=True)[:3]:
+            ips.append(a["ip"])
 
     if "#new_ip" in tags or "#rdp" in tags:
-        rdp_alerts = metrics.get("new_ip_alerts", [])
-        if rdp_alerts:
-            return rdp_alerts[0]["ip"]
+        for a in metrics.get("new_ip_alerts", [])[:2]:
+            if a["ip"] not in ips:
+                ips.append(a["ip"])
 
     # Fallback: парсимо alert_key
-    ak = decision.get("alert_key", "")
-    for prefix in ("brute_", "rdp_new_"):
-        if ak.startswith(prefix):
-            return ak[len(prefix):]
+    if not ips:
+        ak = decision.get("alert_key", "")
+        for prefix in ("brute_", "rdp_new_"):
+            if ak.startswith(prefix):
+                ips.append(ak[len(prefix):])
+                break
 
-    return None
+    return ips
 
 
 def _build_keyboard(decision: dict, config: dict, metrics: dict = None) -> dict:
@@ -145,10 +146,11 @@ def _build_keyboard(decision: dict, config: dict, metrics: dict = None) -> dict:
     if "#disk" in tags:
         row2.append({"text": "💾 Деталі диску", "callback_data": f"disk_{server_id}"})
 
-    # Кнопка блокування IP для брутфорс та нових RDP
-    ip = _extract_alert_ip(decision, metrics)
-    if ip and ("#brute_force" in tags or "#new_ip" in tags):
-        row2.append({"text": f"🚫 Блокувати {ip}", "callback_data": f"block_confirm_{ip}"})
+    # Кнопки блокування — по одній на IP (до 3 штук), по 2 в рядок
+    block_ips = _extract_block_ips(decision, metrics) if ("#brute_force" in tags or "#new_ip" in tags) else []
+    block_btns = [{"text": f"🚫 {ip}", "callback_data": f"block_confirm_{ip}"} for ip in block_ips]
+    for i in range(0, len(block_btns), 2):
+        row2 += block_btns[i:i+2]
 
     buttons = [row1]
     if row2:

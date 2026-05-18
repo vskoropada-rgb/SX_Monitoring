@@ -35,6 +35,10 @@ def analyze(metrics: dict, config: dict) -> dict | None:
     Передає метрики GPT і отримує рішення.
     Повертає dict з рішенням або None якщо не треба слати.
     """
+    # Якщо все в нормі — не витрачаємо токени GPT
+    if not _has_anything_notable(metrics, config):
+        return None
+
     api_key = config.get("OPENAI_API_KEY")
     if not api_key:
         return _fallback_rules(metrics, config)
@@ -42,13 +46,12 @@ def analyze(metrics: dict, config: dict) -> dict | None:
     client = OpenAI(api_key=api_key)
     model = config.get("OPENAI_MODEL", "gpt-4o-mini")
 
-    # Формуємо контекст для GPT
     context = _build_context(metrics, config)
 
     try:
         response = client.chat.completions.create(
             model=model,
-            max_tokens=500,
+            max_tokens=200,
             temperature=0.1,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -144,6 +147,53 @@ def _build_context(metrics: dict, config: dict) -> str:
 
     lines.append("\nВизнач чи потрібно відправляти алерт і поверни JSON.")
     return "\n".join(lines)
+
+
+def _has_anything_notable(metrics: dict, config: dict) -> bool:
+    """Швидка перевірка без GPT — чи є взагалі щось варте аналізу"""
+
+    # Безпека — завжди аналізуємо
+    if metrics.get("brute_force_alerts"):
+        return True
+    if metrics.get("new_ip_alerts"):
+        return True
+    if metrics.get("new_admins"):
+        return True
+    if metrics.get("changed_files"):
+        return True
+    if metrics.get("new_usb_devices"):
+        return True
+    if metrics.get("new_software"):
+        return True
+    if metrics.get("new_scheduled_tasks"):
+        return True
+
+    # Диски
+    warn_pct = float(config.get("DISK_WARNING_PERCENT", 20))
+    for d in metrics.get("disks", []):
+        if d.get("free_pct", 100) < warn_pct:
+            return True
+
+    # CPU / RAM
+    cpu_warn = float(config.get("CPU_WARNING_PERCENT", 85))
+    ram_warn = float(config.get("RAM_WARNING_PERCENT", 90))
+    if metrics.get("cpu", {}).get("percent", 0) > cpu_warn:
+        return True
+    if metrics.get("ram", {}).get("percent", 0) > ram_warn:
+        return True
+
+    # Сервіси
+    if metrics.get("newly_stopped"):
+        return True
+    for svc in metrics.get("services", []):
+        if not svc.get("is_running"):
+            return True
+
+    # Бекапи
+    if metrics.get("status") in ("warning", "error"):
+        return True
+
+    return False
 
 
 def _fallback_rules(metrics: dict, config: dict) -> dict | None:

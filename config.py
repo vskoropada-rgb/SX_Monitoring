@@ -33,8 +33,10 @@ def _decrypt(value: str) -> str:
         import base64
         import win32crypt
         data = base64.b64decode(value[len(_ENCRYPTED_PREFIX):])
-        # CRYPTPROTECT_LOCAL_MACHINE = 4 — matches PowerShell DataProtectionScope.LocalMachine
-        _, plaintext = win32crypt.CryptUnprotectData(data, None, None, None, None, 4)
+        try:
+            _, plaintext = win32crypt.CryptUnprotectData(data, None, None, None, None, 4)
+        except TypeError:
+            _, plaintext = win32crypt.CryptUnprotectData(data, None, None, None, None)
         return plaintext.decode("utf-8")
     except Exception as e:
         logger.error("Не вдалося розшифрувати значення конфігурації: %s", e)

@@ -39,6 +39,9 @@ API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # Стан: очікування підтвердження
 pending_confirmations = {}
 
+# Тред де була написана команда — відповідаємо туди ж, не в TOPIC_ID
+_reply_thread_id: int | None = None
+
 
 def api_call(method: str, data: dict) -> dict:
     try:
@@ -61,8 +64,9 @@ def send(text: str, keyboard=None, message_id: int = None):
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-    if TOPIC_ID:
-        payload["message_thread_id"] = int(TOPIC_ID)
+    thread = _reply_thread_id if _reply_thread_id is not None else (int(TOPIC_ID) if TOPIC_ID else None)
+    if thread:
+        payload["message_thread_id"] = thread
     if keyboard:
         payload["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
 
@@ -347,11 +351,14 @@ def process_callback(query: dict):
 
 
 def process_message(message: dict):
+    global _reply_thread_id
     text = message.get("text", "").strip()
     if not text:
         return
 
-    logger.info(f"Повідомлення: {text}")
+    # Відповідаємо у тому самому треді (гілці форуму) де написана команда
+    _reply_thread_id = message.get("message_thread_id")
+    logger.info(f"Повідомлення: {text} (thread={_reply_thread_id})")
 
     # В групах Telegram команди надходять як /cmd@botname — відкидаємо суфікс
     first_word = text.split()[0]
@@ -384,6 +391,8 @@ def process_message(message: dict):
             storage.set_maintenance(SERVER_ID, until)
             send(f"🔧 Обслуговування увімкнено на {hours}г (до {until.strftime('%H:%M')})")
 
+    _reply_thread_id = None
+
 
 # ─── Long polling ────────────────────────────────────────────
 
@@ -391,16 +400,13 @@ def run():
     logger.info(f"Бот запущений для {COMPANY} ({SERVER_ID})")
 
     if not BOT_TOKEN:
-        logger.error("TG_BOT_TOKEN не налаштований — бот не може запуститись")
-        return
-
-    me = api_call("getMe", {})
-    if me.get("ok"):
-        username = me["result"].get("username", "?")
-        logger.info(f"Бот авторизований як @{username}")
+        logger.error("TG_BOT_TOKEN не налаштований — перевірте .env")
     else:
-        logger.error(f"getMe помилка: {me.get('description', 'невідомо')} — перевірте TG_BOT_TOKEN")
-        return
+        me = api_call("getMe", {})
+        if me.get("ok"):
+            logger.info(f"Бот авторизований як @{me['result'].get('username', '?')}")
+        else:
+            logger.error(f"getMe помилка: {me.get('description', 'невідомо')} — перевірте TG_BOT_TOKEN")
 
     offset = 0
 

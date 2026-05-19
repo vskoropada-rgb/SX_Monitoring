@@ -631,41 +631,72 @@ function Setup-FirstRun {
     }
 }
 
+function Register-TaskXml {
+    # Реєстрація завдання через XML — працює на 2008 R2 де немає ScheduledTasks модуля
+    param([string]$Name, [string]$Command, [string]$Arguments, [string]$TriggerXml)
+    $ce = $Command   -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;' -replace '"','&quot;'
+    $ae = $Arguments -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;' -replace '"','&quot;'
+    $xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo/>
+  <Triggers>$TriggerXml</Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>5</Count></RestartOnFailure>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec><Command>$ce</Command><Arguments>$ae</Arguments></Exec>
+  </Actions>
+</Task>
+"@
+    $tmp = [IO.Path]::ChangeExtension([IO.Path]::GetTempFileName(), '.xml')
+    [IO.File]::WriteAllText($tmp, $xml, [Text.Encoding]::Unicode)
+    schtasks /Delete /TN $Name /F 2>&1 | Out-Null
+    $out = schtasks /Create /TN $Name /XML $tmp /F 2>&1
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    if ($LASTEXITCODE -eq 0) { Write-Ok "$Name створено"; return $true }
+    Write-Err "Помилка ${Name}: $($out -join ' ')"; return $false
+}
+
 function Create-Tasks {
     Write-Step "Створення Task Scheduler завдань..."
 
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    $python    = if ($pythonCmd) { $pythonCmd.Source } else { "python" }
+
+    # Видаляємо старі завдання
     foreach ($t in @("1C_Monitor", "1C_Monitor_Bot", "1C_Monitor_Watchdog")) {
-        Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction SilentlyContinue
+        schtasks /Delete /TN $t /F 2>&1 | Out-Null
     }
 
-    $python    = (Get-Command python).Source
-    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+    # 1C_Monitor — при старті системи
+    Register-TaskXml -Name "1C_Monitor" `
+        -Command  $python `
+        -Arguments "`"$ScriptDir\main.py`"" `
+        -TriggerXml "<BootTrigger><Enabled>true</Enabled></BootTrigger>"
 
-    # main.py — моніторинг + бот в одному процесі, запуск при старті системи
-    $settingsMain = New-ScheduledTaskSettingsSet `
-        -ExecutionTimeLimit (New-TimeSpan -Days 0) `
-        -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1)
-    $aMain = New-ScheduledTaskAction -Execute $python -Argument "`"$ScriptDir\main.py`""
-    $tMain = New-ScheduledTaskTrigger -AtStartup
-    try {
-        Register-ScheduledTask -TaskName "1C_Monitor" -Action $aMain -Trigger $tMain `
-            -Settings $settingsMain -Principal $principal -Force | Out-Null
-        Write-Ok "1C_Monitor створено (при старті, main.py)"
-    } catch { Write-Err "Помилка 1C_Monitor: $_" }
-
-    # Watchdog — кожні 5 хвилин, перезапускає main.py якщо впав
-    $settingsWd = New-ScheduledTaskSettingsSet `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
-        -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-    $aWd = New-ScheduledTaskAction -Execute "powershell" `
-        -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptDir\watchdog.ps1`""
-    $tWd = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 5) `
-                                    -Once -At (Get-Date)
-    try {
-        Register-ScheduledTask -TaskName "1C_Monitor_Watchdog" -Action $aWd -Trigger $tWd `
-            -Settings $settingsWd -Principal $principal -Force | Out-Null
-        Write-Ok "1C_Monitor_Watchdog створено (кожні 5 хвилин)"
-    } catch { Write-Err "Помилка 1C_Monitor_Watchdog: $_" }
+    # 1C_Monitor_Watchdog — кожні 5 хвилин
+    Register-TaskXml -Name "1C_Monitor_Watchdog" `
+        -Command  "powershell.exe" `
+        -Arguments "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptDir\watchdog.ps1`"" `
+        -TriggerXml @"
+<TimeTrigger>
+  <Repetition><Interval>PT5M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+  <StartBoundary>2000-01-01T00:00:00</StartBoundary>
+  <Enabled>true</Enabled>
+</TimeTrigger>
+"@
 }
 
 # ─── 2. Setup company ────────────────────────────────────────
@@ -969,20 +1000,27 @@ function Show-Status {
     Show-Header "6. Статус завдань"
 
     foreach ($name in @("1C_Monitor", "1C_Monitor_Watchdog")) {
-        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-        if (-not $task) {
+        $query = schtasks /Query /TN $name /FO LIST /V 2>&1
+        if ($LASTEXITCODE -ne 0) {
             Write-Host "  $name [НЕ ВСТАНОВЛЕНО]" -ForegroundColor DarkGray
             Write-Host ""
             continue
         }
-        $info  = Get-ScheduledTaskInfo -TaskName $name
-        $state = $task.State
-        $color = switch ($state) { "Running" { "Green" } "Ready" { "Cyan" } default { "Red" } }
+        $statusLine  = ($query | Where-Object { $_ -match "^(Status|Статус):" }     | Select-Object -First 1) -replace '^[^:]+:\s*',''
+        $lastRunLine = ($query | Where-Object { $_ -match "Last Run|Последний" }    | Select-Object -First 1) -replace '^[^:]+:\s*',''
+        $nextRunLine = ($query | Where-Object { $_ -match "Next Run|Следующий" }    | Select-Object -First 1) -replace '^[^:]+:\s*',''
+        $resultLine  = ($query | Where-Object { $_ -match "Last Result|Результат" } | Select-Object -First 1) -replace '^[^:]+:\s*',''
+
+        $state = if ($statusLine -match "Running|Выполняется") { "Running" } `
+            elseif ($statusLine -match "Ready|Готово")         { "Ready"   } `
+            else                                               { $statusLine.Trim() }
+        $color = switch ($state) { "Running" { "Green" } "Ready" { "Cyan" } default { "Yellow" } }
+
         Write-Host "  $name" -NoNewline -ForegroundColor White
         Write-Host " [$state]" -ForegroundColor $color
-        Write-Host "    Останній запуск : $($info.LastRunTime)"
-        Write-Host "    Код результату  : $($info.LastTaskResult)"
-        Write-Host "    Наступний запуск: $($info.NextRunTime)"
+        Write-Host "    Останній запуск : $lastRunLine"
+        Write-Host "    Код результату  : $resultLine"
+        Write-Host "    Наступний запуск: $nextRunLine"
         Write-Host ""
     }
 
@@ -1002,18 +1040,18 @@ function Restart-Monitor {
 
     $tasksExist = $false
     foreach ($name in @("1C_Monitor", "1C_Monitor_Watchdog")) {
-        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-        if (-not $task) {
+        schtasks /Query /TN $name 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
             Write-Info "$name — завдання не знайдено (запустіть пункт 1 для встановлення)"
             continue
         }
         $tasksExist = $true
-        try {
-            Stop-ScheduledTask  -TaskName $name -ErrorAction SilentlyContinue
-            Start-ScheduledTask -TaskName $name
+        schtasks /End /TN $name 2>&1 | Out-Null
+        $out = schtasks /Run /TN $name 2>&1
+        if ($LASTEXITCODE -eq 0) {
             Write-Ok "$name перезапущено"
-        } catch {
-            Write-Err "Не вдалося перезапустити ${name}: $_"
+        } else {
+            Write-Err "Не вдалося перезапустити ${name}: $out"
         }
     }
 
@@ -1021,7 +1059,8 @@ function Restart-Monitor {
     if (-not $tasksExist) {
         Write-Host ""
         Write-Info "Task Scheduler завдання відсутні — запускаю main.py напряму..."
-        $python = (Get-Command python -ErrorAction SilentlyContinue)?.Source
+        $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+        $python    = if ($pythonCmd) { $pythonCmd.Source } else { $null }
         if ($python) {
             Start-Process $python -ArgumentList "`"$ScriptDir\main.py`"" -WindowStyle Hidden
             Write-Ok "main.py запущено (фоновий процес)"
@@ -1044,8 +1083,8 @@ function Uninstall-Monitor {
     if ($confirm -cne "ТАК") { Write-Info "Скасовано."; Pause-Return; return }
 
     foreach ($name in @("1C_Monitor", "1C_Monitor_Bot", "1C_Monitor_Watchdog")) {
-        Stop-ScheduledTask       -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
+        schtasks /End    /TN $name /F 2>&1 | Out-Null
+        schtasks /Delete /TN $name /F 2>&1 | Out-Null
         Write-Ok "Завдання $name видалено"
     }
 

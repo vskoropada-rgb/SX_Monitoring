@@ -112,7 +112,7 @@ def _extract_block_ips(decision: dict, metrics: dict) -> List[str]:
 
     if "#brute_force" in tags or "#security" in tags:
         # Спочатку alerts (вище порогу), потім suspicious_ips (будь-які невідомі)
-        alerts = metrics.get("brute_force_alerts", [])
+        alerts = [a for a in metrics.get("brute_force_alerts", []) if a.get("ip")]
         unknown = [a for a in alerts if not a.get("is_known_network")]
         source = unknown if unknown else alerts
         for a in sorted(source, key=lambda x: x["count"], reverse=True)[:3]:
@@ -121,7 +121,7 @@ def _extract_block_ips(decision: dict, metrics: dict) -> List[str]:
         # Якщо brute_force_alerts порожній — беремо з suspicious_ips
         if not ips:
             for s in metrics.get("suspicious_ips", [])[:3]:
-                if s["ip"] not in ips:
+                if s.get("ip") and s["ip"] not in ips:
                     ips.append(s["ip"])
 
     if "#new_ip" in tags or "#rdp" in tags:

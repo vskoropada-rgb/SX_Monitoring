@@ -117,6 +117,16 @@ def init_db():
 
 # ─── Alerts ──────────────────────────────────────────────────
 
+def _parse_dt(s: str) -> datetime:
+    """Розбирає datetime з SQLite ('YYYY-MM-DD HH:MM:SS') або ISO ('...T...')."""
+    s = s.strip()
+    if "T" in s:
+        return datetime.fromisoformat(s)
+    if "." in s:
+        s = s.split(".", 1)[0]
+    return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+
+
 def can_send_alert(alert_key: str, cooldown_min: int = 30) -> bool:
     with get_conn() as conn:
         row = conn.execute(
@@ -125,7 +135,10 @@ def can_send_alert(alert_key: str, cooldown_min: int = 30) -> bool:
         ).fetchone()
         if not row:
             return True
-        last = datetime.fromisoformat(row["sent_at"])
+        try:
+            last = _parse_dt(row["sent_at"])
+        except (ValueError, TypeError):
+            return True
         return datetime.now() - last > timedelta(minutes=cooldown_min)
 
 

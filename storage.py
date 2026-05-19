@@ -283,6 +283,14 @@ def record_backup(filename: str, size_bytes: int, mtime: str, integrity: str):
         """, (filename, size_bytes, mtime, integrity))
 
 
+def update_backup_integrity(filename: str, integrity: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE backup_history SET integrity = ? WHERE filename = ?",
+            (integrity, filename),
+        )
+
+
 def get_backup_integrity(filename: str) -> Optional[str]:
     with get_conn() as conn:
         row = conn.execute(

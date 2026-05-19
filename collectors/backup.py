@@ -21,15 +21,22 @@ def _check_zip(filepath: str, password: str = None) -> str:
         return "too_small"
     try:
         with zipfile.ZipFile(filepath) as zf:
-            if password:
+            # Перевіряємо прапор шифрування до testzip() —
+            # AES-зашифровані файли кидають BadZipFile замість RuntimeError,
+            # тому покладатись на перехоплення виключень недостатньо.
+            is_encrypted = any(info.flag_bits & 0x1 for info in zf.infolist())
+            if is_encrypted:
+                if not password:
+                    return "encrypted"
                 zf.setpassword(password.encode())
-            result = zf.testzip()
-            return "ok" if result is None else "corrupted"
-    except RuntimeError as e:
-        msg = str(e).lower()
-        if "password" in msg or "encrypted" in msg:
-            return "encrypted"
-        return "corrupted"
+            try:
+                result = zf.testzip()
+                return "ok" if result is None else "corrupted"
+            except RuntimeError as e:
+                msg = str(e).lower()
+                if "password" in msg or "encrypted" in msg:
+                    return "encrypted"
+                return "corrupted"
     except zipfile.BadZipFile:
         return "corrupted"
     except Exception:
@@ -137,7 +144,17 @@ def collect(config: dict) -> dict:
             if f == latest_file:
                 latest_integrity = integ
         elif f == latest_file:
-            latest_integrity = storage.get_backup_integrity(fname) or "ok"
+            stored = storage.get_backup_integrity(fname)
+            if stored in ("corrupted", "error", "unknown"):
+                # Повторна перевірка: файл міг бути перевірений поки ще писався,
+                # або AES-шифрування не було розпізнане (записали як "corrupted")
+                integ = _check_archive(f, zip_password or None)
+                if integ != stored:
+                    storage.update_backup_integrity(fname, integ)
+                    logger.info("Оновлено цілісність бекапу %s: %s → %s", fname, stored, integ)
+                latest_integrity = integ
+            else:
+                latest_integrity = stored or "ok"
 
     # Останні файли за 48г
     recent_files = []

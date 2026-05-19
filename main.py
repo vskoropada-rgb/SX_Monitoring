@@ -2,6 +2,7 @@
 main.py — єдина точка входу: моніторинг (фоновий потік) + Telegram бот
 """
 import atexit
+import ctypes
 import os
 import sys
 import logging
@@ -40,11 +41,51 @@ from bot import run as bot_run
 
 # ─── PID-lock: один екземпляр за раз ─────────────────────────
 
-_PID_FILE = ROOT / "monitor.pid"
+_PID_FILE     = ROOT / "monitor.pid"
+_MUTEX_HANDLE = None
 
 
 def _acquire_lock() -> bool:
-    """Повертає True якщо запуск дозволений (інший екземпляр не працює)."""
+    """
+    Використовує Windows Named Mutex як основний lock.
+    Named Mutex автоматично звільняється при завершенні процесу (навіть примусовому),
+    тому не залежить від psutil.cmdline() який кидає AccessDenied для SYSTEM-процесів.
+    """
+    global _MUTEX_HANDLE
+    server_id   = _cfg.get("SERVER_ID", "default")
+    mutex_name  = f"Global\\1CMonitor_{server_id}"
+
+    try:
+        kernel32      = ctypes.windll.kernel32
+        _MUTEX_HANDLE = kernel32.CreateMutexW(None, True, mutex_name)
+        last_err      = kernel32.GetLastError()
+
+        if last_err == 183:  # ERROR_ALREADY_EXISTS — інший екземпляр вже тримає mutex
+            if _MUTEX_HANDLE:
+                kernel32.CloseHandle(_MUTEX_HANDLE)
+            _MUTEX_HANDLE = None
+            logger.error(
+                "Інший екземпляр вже запущений (mutex %s) — завершення.", mutex_name
+            )
+            return False
+
+        if not _MUTEX_HANDLE:
+            raise OSError(f"CreateMutexW повернув 0 (err={last_err})")
+
+    except OSError as e:
+        logger.error("Не вдалося створити mutex: %s — завершення", e)
+        return False
+    except Exception:
+        # ctypes/windll недоступний — запасний варіант через PID-файл
+        return _acquire_lock_pidfile()
+
+    _PID_FILE.write_text(str(os.getpid()))
+    atexit.register(_release_lock)
+    return True
+
+
+def _acquire_lock_pidfile() -> bool:
+    """Запасний PID-lock (якщо ctypes недоступний — не Windows або старе середовище)."""
     if _PID_FILE.exists():
         try:
             old_pid = int(_PID_FILE.read_text().strip())
@@ -58,7 +99,7 @@ def _acquire_lock() -> bool:
                     )
                     return False
             except Exception:
-                pass  # psutil недоступний або процес вже зупинений
+                pass
         except (ValueError, OSError):
             pass
     _PID_FILE.write_text(str(os.getpid()))
@@ -67,6 +108,12 @@ def _acquire_lock() -> bool:
 
 
 def _release_lock() -> None:
+    if _MUTEX_HANDLE:
+        try:
+            ctypes.windll.kernel32.ReleaseMutex(_MUTEX_HANDLE)
+            ctypes.windll.kernel32.CloseHandle(_MUTEX_HANDLE)
+        except Exception:
+            pass
     try:
         _PID_FILE.unlink()
     except OSError:

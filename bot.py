@@ -92,7 +92,17 @@ def _send(text: str, *, thread_id: Optional[int],
 
     if message_id:
         payload["message_id"] = message_id
-        return _api_call("editMessageText", payload)
+        result = _api_call("editMessageText", payload)
+        if not result.get("ok"):
+            err = result.get("description", "")
+            if "message is not modified" not in err:
+                logger.warning("editMessageText failed: %s — надсилаю нове повідомлення", err)
+                del payload["message_id"]
+                result = _api_call("sendMessage", payload)
+                if not result.get("ok"):
+                    logger.error("sendMessage failed: %s | text=%.80r",
+                                 result.get("description"), text)
+        return result
     result = _api_call("sendMessage", payload)
     if not result.get("ok"):
         logger.error("sendMessage failed: %s | text=%.80r", result.get("description"), text)

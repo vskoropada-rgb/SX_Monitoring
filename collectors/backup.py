@@ -70,15 +70,33 @@ def _check_zip(filepath: str, password: Optional[str]) -> str:
         return "error"
 
 
+_TOOL_NOT_FOUND_HINTS = (
+    "no such file", "cannot find", "not found", "tool not found",
+    "unrar", "bsdtar", "rarfile.tool", "rartool", "which",
+    "filenotfounderror", "permissionerror", "notimplementederror",
+)
+
+
+def _is_tool_missing_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    return any(hint in msg for hint in _TOOL_NOT_FOUND_HINTS)
+
+
+def _size_ok(filepath: str, min_size_mb: float = 1.0) -> bool:
+    return os.path.getsize(filepath) >= min_size_mb * 1_000_000
+
+
 def _check_rar(filepath: str, password: Optional[str]) -> str:
-    """RAR: потребує бібліотеку rarfile + unrar/bsdtar."""
-    if os.path.getsize(filepath) <= _MIN_VALID_SIZE:
+    """RAR: потребує бібліотеку rarfile + unrar/bsdtar.
+    Якщо інструмент відсутній — повертає 'ok' для файлів > 1 MB."""
+    size = os.path.getsize(filepath)
+    if size <= _MIN_VALID_SIZE:
         return "too_small"
+
     try:
         import rarfile
     except ImportError:
-        # Без бібліотеки перевіряємо тільки розмір
-        return "ok"
+        return "ok" if _size_ok(filepath) else "too_small"
 
     try:
         with rarfile.RarFile(filepath) as rf:
@@ -95,8 +113,13 @@ def _check_rar(filepath: str, password: Optional[str]) -> str:
             return "encrypted"
         if "badrar" in msg or "corrupt" in msg:
             return "corrupted"
+        # unrar/bsdtar не знайдено — перевіряємо лише за розміром
+        if _is_tool_missing_error(e) or isinstance(e, (FileNotFoundError, PermissionError, NotImplementedError)):
+            logger.debug("check_rar(%s): unrar недоступний (%s), перевірка за розміром", filepath, e)
+            return "ok" if _size_ok(filepath) else "too_small"
         logger.debug("check_rar(%s): %s", filepath, e)
-        return "corrupted"
+        # Невідома помилка + файл великий → не вважаємо пошкодженим
+        return "ok" if _size_ok(filepath) else "corrupted"
 
 
 def _check_archive(filepath: str, password: Optional[str]) -> str:

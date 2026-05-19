@@ -1,6 +1,7 @@
 psutil==5.9.8
 python-dotenv==1.0.1
-openai==1.35.0
+openai>=1.52.0
 requests==2.31.0
-matplotlib==3.9.0
+matplotlib==3.7.5
 pywin32==306
+rarfile>=4.1

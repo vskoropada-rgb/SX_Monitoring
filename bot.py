@@ -14,16 +14,14 @@ _cfg = _config_module.load()
 import requests
 import json
 import time
+import threading
+from typing import Optional
 from datetime import datetime
 
 import storage
 import actions
 import notifier
 import charts
-
-from collectors import disk as disk_collector
-from collectors import memory as mem_collector
-from collectors import services as svc_collector
 
 logger = logging.getLogger("bot")
 
@@ -36,8 +34,13 @@ DISK_PATHS = [p.strip() for p in _cfg.get("DISK_PATHS", "C:\\").split(",")]
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Стан: очікування підтвердження
-pending_confirmations = {}
+# Тред де була написана команда — відповідаємо туди ж, не в TOPIC_ID
+_reply_thread_id: Optional[int] = None
+
+# Кеш сесій — subprocess qwinsta дорогий, кешуємо на 30с
+_sessions_cache: list = []
+_sessions_cache_ts: float = 0.0
+_SESSIONS_TTL = 30
 
 
 def api_call(method: str, data: dict) -> dict:
@@ -61,8 +64,9 @@ def send(text: str, keyboard=None, message_id: int = None):
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-    if TOPIC_ID:
-        payload["message_thread_id"] = int(TOPIC_ID)
+    thread = _reply_thread_id if _reply_thread_id is not None else (int(TOPIC_ID) if TOPIC_ID else None)
+    if thread:
+        payload["message_thread_id"] = thread
     if keyboard:
         payload["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
 
@@ -77,16 +81,28 @@ def send_photo(image_path: str, caption: str):
     notifier.send_photo(image_path, caption, config)
 
 
+def _get_sessions() -> list:
+    """qwinsta з кешем 30с — не гальмує бот при кожному натисканні"""
+    global _sessions_cache, _sessions_cache_ts
+    now = time.monotonic()
+    if now - _sessions_cache_ts > _SESSIONS_TTL:
+        _sessions_cache = actions.get_sessions()
+        _sessions_cache_ts = now
+    return _sessions_cache
+
+
+def _invalidate_sessions_cache():
+    global _sessions_cache_ts
+    _sessions_cache_ts = 0.0
+
+
 # ─── Обробники команд ────────────────────────────────────────
 
 def handle_status(message_id=None):
-    config   = _config()
-    disk_data = disk_collector.collect(config)
-    mem_data  = mem_collector.collect(config)
-    svc_data  = svc_collector.collect(config)
+    m = storage.load_metrics_cache()
 
     maint_until = storage.get_maintenance_until(SERVER_ID)
-    maint_badge = f"\n🔧 <b>Обслуговування до {maint_until.strftime('%H:%M')})</b>" if maint_until else ""
+    maint_badge = f"\n🔧 <b>Обслуговування до {maint_until.strftime('%H:%M')}</b>" if maint_until else ""
 
     lines = [
         f"📡 <b>Статус — {COMPANY}</b>{maint_badge}",
@@ -94,18 +110,18 @@ def handle_status(message_id=None):
         "",
     ]
 
-    for d in disk_data.get("disks", []):
+    for d in m.get("disks", []):
         if "free_pct" in d:
             icon = "🔴" if d["free_pct"] < 10 else "⚠️" if d["free_pct"] < 20 else "✅"
-            lines.append(f"{icon} Диск {d['path']}: {d['free_pct']}% вільно ({d['free_gb']}GB)")
+            lines.append(f"{icon} {d['path']}: {d['free_pct']}% вільно ({d['free_gb']}GB)")
 
-    cpu = mem_data.get("cpu", {})
-    ram = mem_data.get("ram", {})
+    cpu = m.get("cpu", {})
+    ram = m.get("ram", {})
     lines.append(f"{'🔴' if cpu.get('percent',0)>85 else '✅'} CPU: {cpu.get('percent','?')}%")
     lines.append(f"{'🔴' if ram.get('percent',0)>90 else '✅'} RAM: {ram.get('percent','?')}% (вільно {ram.get('free_gb','?')}GB)")
 
     lines.append("")
-    for svc in svc_data.get("services", []):
+    for svc in m.get("services", []):
         icon = "✅" if svc["is_running"] else "❌"
         lines.append(f"{icon} {svc['name']}")
 
@@ -132,13 +148,16 @@ def handle_status(message_id=None):
             {"text": "🔄 Перезавантажити", "callback_data": f"reboot_confirm_{SERVER_ID}"},
             maint_btn,
         ],
+        [
+            {"text": "🔒 Заблоковані IP", "callback_data": f"blocked_list_{SERVER_ID}"},
+        ],
     ]
 
     send("\n".join(lines), keyboard, message_id)
 
 
 def handle_sessions(message_id=None):
-    sessions = actions.get_sessions()
+    sessions = _get_sessions()
 
     if not sessions:
         text = f"👥 <b>Сесії — {COMPANY}</b>\n\nАктивних сесій немає"
@@ -147,21 +166,21 @@ def handle_sessions(message_id=None):
         return
 
     lines = [f"👥 <b>Активні сесії — {COMPANY}</b>", ""]
-    buttons = []
-
-    for i, s in enumerate(sessions):
-        state_icon = "🟢" if s.get("state") in ("Active", "Activ") else "🟡"
-        lines.append(f"{state_icon} <b>{s.get('username', '?')}</b> | ID: {s.get('session_id')} | {s.get('state')}")
-        buttons.append({"text": f"❌ Вибити {s.get('username', s.get('session_id'))}", "callback_data": f"kick_{s.get('session_id')}_{SERVER_ID}"})
-
     keyboard = []
-    # По 2 кнопки в ряд
-    for i in range(0, len(buttons), 2):
-        keyboard.append(buttons[i:i+2])
+
+    for s in sessions:
+        state_icon = "🟢" if s.get("state") in ("Active", "Activ") else "🟡"
+        user = s.get("username") or s.get("session_name", "?")
+        sid  = s.get("session_id", "")
+        lines.append(f"{state_icon} <b>{user}</b>  ({s.get('state', '')})")
+        keyboard.append([{
+            "text": f"🚪 Завершити {user}",
+            "callback_data": f"kick_{sid}_{SERVER_ID}",
+        }])
 
     keyboard.append([
-        {"text": "❌ Вибити всіх", "callback_data": f"kick_all_{SERVER_ID}"},
-        {"text": "🔙 Назад", "callback_data": f"status_{SERVER_ID}"},
+        {"text": "🚪 Завершити всіх", "callback_data": f"kick_all_{SERVER_ID}"},
+        {"text": "🔙 Назад",          "callback_data": f"status_{SERVER_ID}"},
     ])
 
     send("\n".join(lines), keyboard, message_id)
@@ -236,7 +255,7 @@ def handle_chart(hours: int, metric: str = "combined", message_id=None):
 
 
 def handle_reboot_confirm(message_id=None):
-    sessions = actions.get_sessions()
+    sessions = _get_sessions()
     session_count = len(sessions)
 
     warn = f"\n⚠️ Є <b>{session_count}</b> активних сесій!" if session_count > 0 else ""
@@ -280,10 +299,9 @@ def handle_backup_chart(message_id=None):
 
 def handle_kick(session_id: str, message_id=None):
     ok, msg = actions.kick_session(session_id)
+    _invalidate_sessions_cache()
     icon = "✅" if ok else "❌"
-    text = f"{icon} {msg}"
-    time.sleep(1)
-    handle_sessions(message_id)
+    send(f"{icon} {msg}", [[{"text": "🔄 Оновити список", "callback_data": f"sessions_{SERVER_ID}"}]], message_id)
 
 
 def handle_kick_all(message_id=None):
@@ -293,16 +311,80 @@ def handle_kick_all(message_id=None):
     send(text, keyboard, message_id)
 
 
+def handle_blocked_list(message_id=None):
+    blocked = actions.list_blocked_ips()
+    if not blocked:
+        text = f"🔒 <b>Заблоковані IP — {COMPANY}</b>\n\nЗаблокованих IP немає"
+        keyboard = [[{"text": "🔙 Назад", "callback_data": f"status_{SERVER_ID}"}]]
+        send(text, keyboard, message_id)
+        return
+
+    lines = [f"🔒 <b>Заблоковані IP — {COMPANY}</b>", ""]
+    for ip in blocked:
+        lines.append(f"🚫 <code>{ip}</code>")
+
+    buttons = [{"text": f"🔓 {ip}", "callback_data": f"unblock_confirm_{ip}"} for ip in blocked]
+    keyboard = []
+    for i in range(0, len(buttons), 2):
+        keyboard.append(buttons[i:i+2])
+    keyboard.append([{"text": "🔙 Назад", "callback_data": f"status_{SERVER_ID}"}])
+    send("\n".join(lines), keyboard, message_id)
+
+
+def handle_block_confirm(ip: str, message_id=None):
+    text = (
+        f"🚫 <b>Блокування IP</b>\n\n"
+        f"IP: <code>{ip}</code>\n\n"
+        f"Буде створено правило Windows Firewall яке заблокує "
+        f"всі вхідні з'єднання з цього IP.\n\n"
+        f"Підтвердіть дію:"
+    )
+    keyboard = [
+        [
+            {"text": "✅ Заблокувати", "callback_data": f"block_do_{ip}"},
+            {"text": "❌ Скасувати",   "callback_data": f"status_{SERVER_ID}"},
+        ]
+    ]
+    send(text, keyboard, message_id)
+
+
+def handle_block_do(ip: str, message_id=None):
+    ok, msg = actions.block_ip(ip)
+    icon = "✅" if ok else "❌"
+    keyboard = [
+        [
+            {"text": "🔒 Заблоковані IP", "callback_data": f"blocked_list_{SERVER_ID}"},
+            {"text": "🔙 Статус",          "callback_data": f"status_{SERVER_ID}"},
+        ]
+    ]
+    send(f"{icon} {msg}", keyboard, message_id)
+
+
+def handle_unblock_confirm(ip: str, message_id=None):
+    text = (
+        f"🔓 <b>Зняття блокування</b>\n\n"
+        f"IP: <code>{ip}</code>\n\nПідтвердіть:"
+    )
+    keyboard = [
+        [
+            {"text": "✅ Розблокувати", "callback_data": f"unblock_do_{ip}"},
+            {"text": "❌ Скасувати",    "callback_data": f"blocked_list_{SERVER_ID}"},
+        ]
+    ]
+    send(text, keyboard, message_id)
+
+
+def handle_unblock_do(ip: str, message_id=None):
+    ok, msg = actions.unblock_ip(ip)
+    icon = "✅" if ok else "❌"
+    keyboard = [[{"text": "🔒 Заблоковані IP", "callback_data": f"blocked_list_{SERVER_ID}"}]]
+    send(f"{icon} {msg}", keyboard, message_id)
+
+
 # ─── Dispatcher ─────────────────────────────────────────────
 
-def process_callback(query: dict):
-    data = query.get("data", "")
-    callback_id = query.get("id")
-    message_id = query.get("message", {}).get("message_id")
-
-    answer_callback(callback_id)
-    logger.info(f"Callback: {data}")
-
+def _dispatch_callback(data: str, message_id: Optional[int]):
+    """Виконується в окремому потоці — не блокує polling loop"""
     if data.startswith("status_"):
         handle_status(message_id)
     elif data.startswith("sessions_"):
@@ -344,29 +426,64 @@ def process_callback(query: dict):
         service = _cfg.get("MONITOR_SERVICES", "").split(",")[0].strip()
         ok, msg = actions.restart_service(service)
         send(f"{'✅' if ok else '❌'} {msg}")
+    elif data.startswith("blocked_list_"):
+        handle_blocked_list(message_id)
+    elif data.startswith("block_confirm_"):
+        handle_block_confirm(data[len("block_confirm_"):], message_id)
+    elif data.startswith("block_do_"):
+        handle_block_do(data[len("block_do_"):], message_id)
+    elif data.startswith("unblock_confirm_"):
+        handle_unblock_confirm(data[len("unblock_confirm_"):], message_id)
+    elif data.startswith("unblock_do_"):
+        handle_unblock_do(data[len("unblock_do_"):], message_id)
+
+
+def process_callback(query: dict):
+    data        = query.get("data", "")
+    callback_id = query.get("id")
+    message_id  = query.get("message", {}).get("message_id")
+
+    # Підтверджуємо натискання кнопки ОДРАЗУ — прибирає spinning indicator
+    answer_callback(callback_id)
+    logger.info(f"Callback: {data}")
+
+    # Обробляємо в окремому потоці — бот не чекає і одразу готовий до наступного
+    threading.Thread(
+        target=_dispatch_callback,
+        args=(data, message_id),
+        daemon=True,
+    ).start()
 
 
 def process_message(message: dict):
+    global _reply_thread_id
     text = message.get("text", "").strip()
     if not text:
         return
 
-    logger.info(f"Повідомлення: {text}")
+    # Відповідаємо у тому самому треді (гілці форуму) де написана команда
+    _reply_thread_id = message.get("message_thread_id")
+    logger.info(f"Повідомлення: {text} (thread={_reply_thread_id})")
 
-    if text in ("/status", "/start"):
+    # В групах Telegram команди надходять як /cmd@botname — відкидаємо суфікс
+    first_word = text.split()[0]
+    cmd = first_word.split("@")[0].lower()
+    args = text[len(first_word):].strip()
+
+    if cmd in ("/status", "/start"):
         handle_status()
-    elif text == "/sessions":
+    elif cmd == "/sessions":
         handle_sessions()
-    elif text == "/disk":
+    elif cmd == "/disk":
         handle_disk()
-    elif text == "/backups":
+    elif cmd == "/backups":
         handle_backups()
-    elif text.startswith("/chart"):
+    elif cmd == "/chart":
         handle_chart(24)
-    elif text.startswith("/maintenance"):
+    elif cmd == "/maintenance":
         # /maintenance 2h  або  /maintenance off
-        parts = text.split()
-        arg = parts[1].lower() if len(parts) > 1 else ""
+        parts = args.split()
+        arg = parts[0].lower() if parts else ""
         if arg == "off":
             storage.clear_maintenance(SERVER_ID)
             send("✅ Режим обслуговування знято")
@@ -379,11 +496,23 @@ def process_message(message: dict):
             storage.set_maintenance(SERVER_ID, until)
             send(f"🔧 Обслуговування увімкнено на {hours}г (до {until.strftime('%H:%M')})")
 
+    _reply_thread_id = None
+
 
 # ─── Long polling ────────────────────────────────────────────
 
 def run():
     logger.info(f"Бот запущений для {COMPANY} ({SERVER_ID})")
+
+    if not BOT_TOKEN:
+        logger.error("TG_BOT_TOKEN не налаштований — перевірте .env")
+    else:
+        me = api_call("getMe", {})
+        if me.get("ok"):
+            logger.info(f"Бот авторизований як @{me['result'].get('username', '?')}")
+        else:
+            logger.error(f"getMe помилка: {me.get('description', 'невідомо')} — перевірте TG_BOT_TOKEN")
+
     offset = 0
 
     while True:
@@ -393,6 +522,11 @@ def run():
                 "timeout": 30,
                 "allowed_updates": ["message", "callback_query"],
             })
+
+            if not result.get("ok"):
+                logger.error(f"getUpdates помилка: {result.get('description', result)}")
+                time.sleep(5)
+                continue
 
             updates = result.get("result", [])
             for update in updates:

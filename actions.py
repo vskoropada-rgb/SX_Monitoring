@@ -1,49 +1,65 @@
 """
-actions.py — дії на сервері: завершення сесій, перезапуск сервісів, перезавантаження
+actions.py — дії на сервері: завершення сесій, перезапуск сервісів, перезавантаження, firewall
 """
 import subprocess
 import logging
+from typing import List, Tuple
 import psutil
 
 logger = logging.getLogger(__name__)
 
+_FW_RULE_PREFIX = "1C_Monitor_Block_"
+
 
 def get_sessions() -> list:
-    """Повертає список активних сесій"""
+    """Повертає список активних сесій через qwinsta"""
     sessions = []
     try:
         result = subprocess.run(
-            ["qwinsta"],
-            capture_output=True, text=True, encoding="cp866"
+            ["qwinsta"], capture_output=True, text=True, encoding="cp866"
         )
         lines = result.stdout.splitlines()
+        if not lines:
+            return sessions
+
+        # Визначаємо позиції колонок з заголовка (fixed-width format)
+        header = lines[0]
+        user_col  = header.find("USERNAME")
+        id_col    = header.find("ID")
+        state_col = header.find("STATE")
+        if id_col < 0 or state_col < 0:
+            user_col, id_col, state_col = 19, 38, 48
+
         for line in lines[1:]:
-            parts = line.split()
-            if len(parts) >= 3:
-                # Формат: SESSIONNAME  USERNAME  ID  STATE
-                try:
-                    if len(parts) >= 4 and parts[3] in ("Active", "Activ", "Disc"):
-                        sessions.append({
-                            "session_name": parts[0],
-                            "username": parts[1],
-                            "session_id": parts[2],
-                            "state": parts[3],
-                        })
-                    elif len(parts) >= 3 and parts[0] not in ("console", "services", "rdp-tcp", ">services", ">console"):
-                        sessions.append({
-                            "session_name": parts[0],
-                            "username": parts[1] if len(parts) > 1 else "",
-                            "session_id": parts[2] if len(parts) > 2 else "",
-                            "state": parts[3] if len(parts) > 3 else "Unknown",
-                        })
-                except Exception:
-                    pass
+            if len(line) <= id_col:
+                continue
+            line_body    = line[1:]  # прибираємо '>' або пробіл на початку
+            session_name = line_body[:user_col].strip()
+            username     = line_body[user_col:id_col].strip()
+            rest = line_body[id_col:].split()
+            if not rest or not rest[0].isdigit():
+                continue
+            session_id = rest[0]
+            state      = rest[1] if len(rest) > 1 else "Unknown"
+
+            # Пропускаємо системні сесії без користувача
+            if not username and session_name in ("services", "rdp-tcp"):
+                continue
+            if state not in ("Active", "Activ", "Disc"):
+                continue
+
+            sessions.append({
+                "session_name": session_name,
+                "username":     username if username else session_name,
+                "session_id":   session_id,
+                "state":        state,
+            })
     except Exception as e:
         logger.error(f"Помилка отримання сесій: {e}")
     return sessions
 
 
-def kick_session(session_id: str) -> tuple[bool, str]:
+def kick_session(session_id: str) -> Tuple[bool, str]:
     """Завершує RDP сесію за ID"""
     try:
         result = subprocess.run(
@@ -59,7 +75,7 @@ def kick_session(session_id: str) -> tuple[bool, str]:
         return False, f"Виняток: {e}"
 
 
-def kick_all_sessions() -> tuple[bool, str]:
+def kick_all_sessions() -> Tuple[bool, str]:
     """Завершує всі активні RDP сесії"""
     sessions = get_sessions()
     if not sessions:
@@ -75,7 +91,7 @@ def kick_all_sessions() -> tuple[bool, str]:
     return True, "\n".join(results)
 
 
-def restart_service(service_name: str) -> tuple[bool, str]:
+def restart_service(service_name: str) -> Tuple[bool, str]:
     """Перезапускає Windows сервіс"""
     try:
         # Зупиняємо
@@ -103,7 +119,7 @@ def restart_service(service_name: str) -> tuple[bool, str]:
         return False, f"Виняток: {e}"
 
 
-def start_service(service_name: str) -> tuple[bool, str]:
+def start_service(service_name: str) -> Tuple[bool, str]:
     """Запускає зупинений сервіс"""
     try:
         result = subprocess.run(
@@ -118,7 +134,7 @@ def start_service(service_name: str) -> tuple[bool, str]:
         return False, f"Виняток: {e}"
 
 
-def reboot_server(delay_sec: int = 30) -> tuple[bool, str]:
+def reboot_server(delay_sec: int = 30) -> Tuple[bool, str]:
     """Перезавантажує сервер з затримкою"""
     try:
         result = subprocess.run(
@@ -133,13 +149,61 @@ def reboot_server(delay_sec: int = 30) -> tuple[bool, str]:
         return False, f"Виняток: {e}"
 
 
-def cancel_reboot() -> tuple[bool, str]:
+def cancel_reboot() -> Tuple[bool, str]:
     """Скасовує заплановане перезавантаження"""
     try:
         subprocess.run(["shutdown", "/a"], capture_output=True)
         return True, "Перезавантаження скасовано"
     except Exception as e:
         return False, str(e)
+
+
+def block_ip(ip: str) -> Tuple[bool, str]:
+    """Блокує вхідні з'єднання з IP через Windows Firewall"""
+    rule_name = f"{_FW_RULE_PREFIX}{ip}"
+    try:
+        result = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "add", "rule",
+             f"name={rule_name}", "dir=in", "action=block",
+             f"remoteip={ip}", "protocol=any", "enable=yes"],
+            capture_output=True, text=True, encoding="cp866"
+        )
+        if result.returncode == 0:
+            import storage
+            storage.record_blocked_ip(ip)
+            logger.info("IP %s заблоковано у Firewall", ip)
+            return True, f"IP {ip} заблоковано у Windows Firewall"
+        return False, f"Помилка: {(result.stdout + result.stderr).strip()}"
+    except Exception as e:
+        return False, str(e)
+
+
+def unblock_ip(ip: str) -> Tuple[bool, str]:
+    """Знімає блокування IP з Windows Firewall"""
+    rule_name = f"{_FW_RULE_PREFIX}{ip}"
+    try:
+        result = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "delete", "rule",
+             f"name={rule_name}"],
+            capture_output=True, text=True, encoding="cp866"
+        )
+        if result.returncode == 0:
+            import storage
+            storage.remove_blocked_ip(ip)
+            logger.info("Блокування IP %s знято", ip)
+            return True, f"IP {ip} розблоковано"
+        return False, f"Помилка: {(result.stdout + result.stderr).strip()}"
+    except Exception as e:
+        return False, str(e)
+
+
+def list_blocked_ips() -> List[str]:
+    """Повертає список IP заблокованих через цей моніторинг"""
+    try:
+        import storage as _storage
+        return sorted(_storage.get_blocked_ips())
+    except Exception:
+        return []
 
 
 def get_disk_details(paths: list) -> str:

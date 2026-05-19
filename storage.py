@@ -100,6 +100,18 @@ def init_db():
             task_name  TEXT PRIMARY KEY,
             first_seen DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+        -- Заблоковані IP (через Telegram бот → Windows Firewall)
+        CREATE TABLE IF NOT EXISTS blocked_ips (
+            ip         TEXT PRIMARY KEY,
+            blocked_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Кеш останніх метрик для швидкого відображення в боті
+        CREATE TABLE IF NOT EXISTS metrics_cache (
+            key        TEXT PRIMARY KEY,
+            data       TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         """)
 
 
@@ -271,6 +283,14 @@ def record_backup(filename: str, size_bytes: int, mtime: str, integrity: str):
         """, (filename, size_bytes, mtime, integrity))
 
 
+def update_backup_integrity(filename: str, integrity: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE backup_history SET integrity = ? WHERE filename = ?",
+            (integrity, filename),
+        )
+
+
 def get_backup_integrity(filename: str) -> Optional[str]:
     with get_conn() as conn:
         row = conn.execute(
@@ -337,6 +357,42 @@ def register_task(task_name: str):
         conn.execute(
             "INSERT OR IGNORE INTO known_tasks (task_name) VALUES (?)", (task_name,)
         )
+
+
+# ─── Metrics cache ───────────────────────────────────────────
+
+def cache_metrics(data: dict):
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO metrics_cache (key, data) VALUES ('last', ?)
+            ON CONFLICT(key) DO UPDATE SET data=excluded.data, updated_at=CURRENT_TIMESTAMP
+        """, (json.dumps(data, default=str),))
+
+
+def load_metrics_cache() -> dict:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT data FROM metrics_cache WHERE key='last'"
+        ).fetchone()
+        return json.loads(row["data"]) if row else {}
+
+
+# ─── Blocked IPs ─────────────────────────────────────────────
+
+def record_blocked_ip(ip: str):
+    with get_conn() as conn:
+        conn.execute("INSERT OR IGNORE INTO blocked_ips (ip) VALUES (?)", (ip,))
+
+
+def remove_blocked_ip(ip: str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM blocked_ips WHERE ip = ?", (ip,))
+
+
+def get_blocked_ips() -> set:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT ip FROM blocked_ips").fetchall()
+        return {r["ip"] for r in rows}
 
 
 # ─── Cleanup ─────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-# watchdog.ps1 — ensures main.py is always running
+﻿# watchdog.ps1 — ensures main.py is always running
 # Triggered by Task Scheduler every 5 minutes under SYSTEM
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path

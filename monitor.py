@@ -40,9 +40,6 @@ def run():
     try:
         disk_data = disk.collect(config)
         all_metrics.update(disk_data)
-        storage.save_metric("disk_free_c", next(
-            (d["free_pct"] for d in disk_data.get("disks", []) if "C:" in d.get("path", "")), 0
-        ))
         logger.info("Диски: %s", [f"{d['path']}={d.get('free_pct')}%" for d in disk_data.get("disks", [])])
     except Exception as e:
         logger.error("Помилка збору дисків: %s", e)
@@ -51,8 +48,6 @@ def run():
     try:
         mem_data = memory.collect(config)
         all_metrics.update(mem_data)
-        storage.save_metric("cpu_percent", mem_data.get("cpu", {}).get("percent", 0))
-        storage.save_metric("ram_percent", mem_data.get("ram", {}).get("percent", 0))
         logger.info("CPU: %s%%, RAM: %s%%",
                     mem_data.get("cpu", {}).get("percent"),
                     mem_data.get("ram", {}).get("percent"))
@@ -146,6 +141,25 @@ def run():
                 logger.info("Щоденний звіт надіслано")
     except Exception as e:
         logger.error("Помилка щоденного звіту: %s", e)
+
+    # ── Кеш для швидкого відображення в боті ─────────────────
+    try:
+        storage.cache_metrics(all_metrics)
+    except Exception:
+        pass
+
+    # ── Фільтр: не алертити по вже заблокованих IP ───────────
+    if all_metrics.get("brute_force_alerts"):
+        blocked = storage.get_blocked_ips()
+        if blocked:
+            before = len(all_metrics["brute_force_alerts"])
+            all_metrics["brute_force_alerts"] = [
+                a for a in all_metrics["brute_force_alerts"]
+                if a["ip"] not in blocked
+            ]
+            filtered = before - len(all_metrics["brute_force_alerts"])
+            if filtered:
+                logger.info("Відфільтровано %d вже заблокованих IP", filtered)
 
     # ── Аналіз і відправка алертів ────────────────────────────
     if not maintenance:

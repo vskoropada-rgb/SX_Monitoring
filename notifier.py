@@ -3,6 +3,7 @@ notifier.py — відправка повідомлень в Telegram
 """
 import requests
 import logging
+from typing import List
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -26,38 +27,27 @@ def send_alert(decision: dict, metrics: dict, config: dict) -> bool:
         return False
 
     icon = SEVERITY_ICONS.get(decision.get("severity", "info"), "ℹ️")
-    tags = " ".join(decision.get("tags", []))
+    tags_list = decision.get("tags", [])
     title = decision.get("title", "Подія на сервері")
     analysis = decision.get("analysis", "")
-    recommendation = decision.get("recommendation", "")
-    now = datetime.now().strftime("%H:%M %d.%m.%Y")
+    now = datetime.now().strftime("%H:%M")
 
-    # Формуємо повідомлення
-    lines = [
-        f"{icon} <b>[{company}]</b> {now}",
-        f"{tags}",
-        "",
-        f"<b>{title}</b>",
-    ]
+    lines = [f"{icon} <b>{title}</b>  {now}"]
 
     if analysis:
-        lines.append("")
-        lines.append(f"📋 {analysis}")
+        lines.append(analysis)
 
-    if recommendation:
-        lines.append("")
-        lines.append(f"⚡ <b>Рекомендація:</b> {recommendation}")
-
-    # Додаємо ключові метрики
-    metrics_block = _format_metrics_block(metrics)
-    if metrics_block:
-        lines.append("")
-        lines.append(metrics_block)
+    # Метрики — тільки для не-security алертів, коротко
+    is_security = any(t in tags_list for t in ("#brute_force", "#new_ip", "#admin", "#files"))
+    if not is_security:
+        metrics_block = _format_metrics_block(metrics)
+        if metrics_block:
+            lines.append(metrics_block)
 
     text = "\n".join(lines)
 
     # Кнопки дій
-    keyboard = _build_keyboard(decision, config)
+    keyboard = _build_keyboard(decision, config, metrics)
 
     return _send_message(bot_token, group_id, topic_id, text, keyboard)
 
@@ -71,39 +61,64 @@ def send_message(text: str, config: dict, keyboard=None) -> bool:
 
 
 def _format_metrics_block(metrics: dict) -> str:
-    lines = ["📊 <b>Метрики:</b>"]
+    parts = []
 
-    if "disks" in metrics:
-        for d in metrics["disks"]:
-            if "free_pct" in d:
-                delta = f" ↓{abs(d['delta_1h']):.1f}%/г" if d.get("delta_1h") and d["delta_1h"] < 0 else ""
-                lines.append(f"• Диск {d['path']}: {d['free_pct']}% вільно ({d['free_gb']}GB){delta}")
+    for d in metrics.get("disks", []):
+        if "free_pct" in d:
+            delta = f" ↓{abs(d['delta_1h']):.1f}%/г" if d.get("delta_1h") and d["delta_1h"] < 0 else ""
+            parts.append(f"💾 {d['path']} {d['free_pct']}% ({d['free_gb']}GB){delta}")
 
     if "cpu" in metrics:
-        lines.append(f"• CPU: {metrics['cpu']['percent']}% | RAM: {metrics['ram']['percent']}%")
+        parts.append(f"CPU {metrics['cpu']['percent']}% · RAM {metrics['ram']['percent']}%")
 
-    if "services" in metrics:
-        for svc in metrics["services"]:
-            icon = "✅" if svc["is_running"] else "❌"
-            lines.append(f"• {icon} {svc['name']}")
+    stopped = [s["name"] for s in metrics.get("services", []) if not s["is_running"]]
+    if stopped:
+        parts.append("❌ " + ", ".join(stopped))
 
-    if len(lines) == 1:
-        return ""
-    return "\n".join(lines)
+    return "\n".join(parts)
 
 
-def _build_keyboard(decision: dict, config: dict) -> dict:
+def _extract_block_ips(decision: dict, metrics: dict) -> List[str]:
+    """Повертає список IP які треба запропонувати заблокувати"""
+    tags = decision.get("tags", [])
+    ips = []
+
+    if "#brute_force" in tags:
+        alerts = metrics.get("brute_force_alerts", [])
+        unknown = [a for a in alerts if not a.get("is_known_network")]
+        source = unknown if unknown else alerts
+        # Сортуємо за кількістю спроб, max 3 кнопки
+        for a in sorted(source, key=lambda x: x["count"], reverse=True)[:3]:
+            ips.append(a["ip"])
+
+    if "#new_ip" in tags or "#rdp" in tags:
+        for a in metrics.get("new_ip_alerts", [])[:2]:
+            if a["ip"] not in ips:
+                ips.append(a["ip"])
+
+    # Fallback: парсимо alert_key
+    if not ips:
+        ak = decision.get("alert_key", "")
+        for prefix in ("brute_", "rdp_new_"):
+            if ak.startswith(prefix):
+                ips.append(ak[len(prefix):])
+                break
+
+    return ips
+
+
+def _build_keyboard(decision: dict, config: dict, metrics: dict = None) -> dict:
     """Будує inline клавіатуру залежно від типу алерту"""
     tags = decision.get("tags", [])
     server_id = config.get("SERVER_ID", "server")
-    buttons = []
+    if metrics is None:
+        metrics = {}
 
-    row1 = []
+    row1 = [
+        {"text": "📊 Статус", "callback_data": f"status_{server_id}"},
+        {"text": "👥 Сесії",  "callback_data": f"sessions_{server_id}"},
+    ]
     row2 = []
-
-    # Завжди показуємо статус і сесії
-    row1.append({"text": "📊 Статус", "callback_data": f"status_{server_id}"})
-    row1.append({"text": "👥 Сесії", "callback_data": f"sessions_{server_id}"})
 
     if "#service" in tags:
         row2.append({"text": "🔄 Перезапустити сервіс", "callback_data": f"restart_service_{server_id}"})
@@ -114,7 +129,13 @@ def _build_keyboard(decision: dict, config: dict) -> dict:
     if "#disk" in tags:
         row2.append({"text": "💾 Деталі диску", "callback_data": f"disk_{server_id}"})
 
-    buttons.append(row1)
+    # Кнопки блокування — по одній на IP (до 3 штук), по 2 в рядок
+    block_ips = _extract_block_ips(decision, metrics) if ("#brute_force" in tags or "#new_ip" in tags) else []
+    block_btns = [{"text": f"🚫 {ip}", "callback_data": f"block_confirm_{ip}"} for ip in block_ips]
+    for i in range(0, len(block_btns), 2):
+        row2 += block_btns[i:i+2]
+
+    buttons = [row1]
     if row2:
         buttons.append(row2)
 

@@ -1000,12 +1000,35 @@ function Restart-Monitor {
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Write-Ok "Процеси зупинені"
 
+    $tasksExist = $false
     foreach ($name in @("1C_Monitor", "1C_Monitor_Watchdog")) {
+        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if (-not $task) {
+            Write-Info "$name — завдання не знайдено (запустіть пункт 1 для встановлення)"
+            continue
+        }
+        $tasksExist = $true
         try {
             Stop-ScheduledTask  -TaskName $name -ErrorAction SilentlyContinue
             Start-ScheduledTask -TaskName $name
             Write-Ok "$name перезапущено"
-        } catch { Write-Err "Не вдалося перезапустити $name" }
+        } catch {
+            Write-Err "Не вдалося перезапустити ${name}: $_"
+        }
+    }
+
+    # Якщо Task Scheduler завдань ще немає — запускаємо main.py напряму
+    if (-not $tasksExist) {
+        Write-Host ""
+        Write-Info "Task Scheduler завдання відсутні — запускаю main.py напряму..."
+        $python = (Get-Command python -ErrorAction SilentlyContinue)?.Source
+        if ($python) {
+            Start-Process $python -ArgumentList "`"$ScriptDir\main.py`"" -WindowStyle Hidden
+            Write-Ok "main.py запущено (фоновий процес)"
+            Write-Host "  Для постійного запуску при старті системи — виконайте пункт 1." -ForegroundColor Yellow
+        } else {
+            Write-Err "Python не знайдений — спочатку виконайте пункт 0, потім пункт 1."
+        }
     }
 
     Pause-Return

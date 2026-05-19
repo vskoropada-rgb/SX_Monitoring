@@ -14,8 +14,9 @@ $EnvFile    = Join-Path $ScriptDir ".env"
 $EnvExample = Join-Path $ScriptDir ".env.example"
 $ReqFile    = Join-Path $ScriptDir "requirements.txt"
 
-# Python 3.8 — остання версія з підтримкою Windows 2008 R2
-$PY_VERSION     = "3.8.20"
+# Python 3.8.10 — остання версія з Windows-інсталятором для 2008 R2
+# 3.8.11+ виходили лише як source tarballs, Windows .exe відсутній
+$PY_VERSION     = "3.8.10"
 $PY_URL         = "https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-amd64.exe"
 $PY_MIN_MAJOR   = 3
 $PY_MIN_MINOR   = 8
@@ -428,16 +429,54 @@ function Prepare-Server {
 }
 
 function Test-PythonVersion {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) {
-        Write-Err "Python не знайдений у PATH"
+    # Refresh PATH so Python installed earlier in the same session is visible
+    Refresh-Path
+
+    $pyExe = $null
+
+    # 1. Try standard command names in PATH
+    foreach ($c in @("python", "py", "python3")) {
+        $found = Get-Command $c -ErrorAction SilentlyContinue
+        if ($found) { $pyExe = $found; break }
+    }
+
+    # 2. Registry fallback — covers installs that did not update PATH yet
+    if (-not $pyExe) {
+        foreach ($root in @(
+            "HKLM:\SOFTWARE\Python\PythonCore",
+            "HKCU:\SOFTWARE\Python\PythonCore",
+            "HKLM:\SOFTWARE\Wow6432Node\Python\PythonCore"
+        )) {
+            if (-not (Test-Path $root)) { continue }
+            Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
+                $ip = (Get-ItemProperty "$($_.PSPath)\InstallPath" -ErrorAction SilentlyContinue).'(default)'
+                if ($ip -and (Test-Path "$ip\python.exe")) {
+                    $env:Path = "$ip;$ip\Scripts;$env:Path"
+                    $pyExe = Get-Command python -ErrorAction SilentlyContinue
+                }
+            }
+            if ($pyExe) { break }
+        }
+    }
+
+    if (-not $pyExe) {
+        Write-Err "Python не знайдений у PATH та реєстрі"
         return $false
     }
-    $verStr = python --version 2>&1
+
+    # Use -c to print to stdout — avoids $ErrorActionPreference swallowing stderr capture
+    $verStr = & $pyExe.Source -c "import sys; print('Python ' + sys.version.split()[0])" 2>$null
+    if (-not $verStr) {
+        # Fallback: --version (some builds print to stdout, some to stderr)
+        $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        $verStr = "$(& $pyExe.Source --version 2>&1)".Trim()
+        $ErrorActionPreference = $prev
+    }
+
     if ($verStr -match "Python (\d+)\.(\d+)") {
         $major = [int]$matches[1]; $minor = [int]$matches[2]
         if ($major -gt $PY_MIN_MAJOR -or ($major -eq $PY_MIN_MAJOR -and $minor -ge $PY_MIN_MINOR)) {
-            Write-Ok "Python: $verStr  ($($cmd.Source))"
+            Write-Ok "Python: $verStr  ($($pyExe.Source))"
             return $true
         }
         Write-Err "Python $major.$minor — застаріла версія, потрібно $PY_MIN_MAJOR.$PY_MIN_MINOR+"

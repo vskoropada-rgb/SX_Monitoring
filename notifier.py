@@ -37,18 +37,16 @@ def send_alert(decision: dict, metrics: dict, config: dict) -> bool:
     if analysis:
         lines.append(analysis)
 
-    # Брутфорс — показуємо IP/юзернейми/регіон завжди коли є дані
-    all_suspects = metrics.get("brute_force_alerts") or metrics.get("suspicious_ips") or []
-    if all_suspects:
-        for entry in all_suspects[:3]:
-            ip = entry.get("ip", "")
-            users = ", ".join(entry.get("usernames", [])[:3]) or "?"
-            if ip:
-                geo = _ip_geo(ip)
-                geo_str = f" [{geo}]" if geo else ""
-                lines.append(f"🔑 {ip}{geo_str} — {entry['count']} спроб ({users})")
-            else:
-                lines.append(f"🔑 невідомий IP — {entry['count']} спроб ({users})")
+    # Брутфорс — показуємо лише записи з реальним IP (без IP = локальні
+    # сервісні акаунти, нічого не дають для дії)
+    raw_suspects = metrics.get("brute_force_alerts") or metrics.get("suspicious_ips") or []
+    all_suspects = [e for e in raw_suspects if e.get("ip")]
+    for entry in all_suspects[:3]:
+        ip = entry["ip"]
+        users = ", ".join(entry.get("usernames", [])[:3]) or "?"
+        geo = _ip_geo(ip)
+        geo_str = f" [{geo}]" if geo else ""
+        lines.append(f"🔑 {ip}{geo_str} — {entry['count']} спроб ({users})")
 
     # Метрики — тільки для не-security алертів, коротко
     is_security = any(t in tags_list for t in ("#brute_force", "#new_ip", "#admin", "#files", "#security"))

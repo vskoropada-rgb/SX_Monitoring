@@ -93,7 +93,10 @@ def _send(text: str, *, thread_id: Optional[int],
     if message_id:
         payload["message_id"] = message_id
         return _api_call("editMessageText", payload)
-    return _api_call("sendMessage", payload)
+    result = _api_call("sendMessage", payload)
+    if not result.get("ok"):
+        logger.error("sendMessage failed: %s | text=%.80r", result.get("description"), text)
+    return result
 
 
 def _send_photo(image_path: str, caption: str, thread_id: Optional[int]) -> None:
@@ -621,8 +624,14 @@ def run() -> None:
             }, timeout=40)
 
             if not result.get("ok"):
-                logger.error("getUpdates помилка: %s", result.get("description", result))
-                time.sleep(5)
+                desc = result.get("description", str(result))
+                if "Conflict" in desc:
+                    # Інший екземпляр бота активний — чекаємо поки його лонг-полл (30с) завершиться
+                    logger.warning("getUpdates конфлікт — паралельний екземпляр! Чекаю 35с...")
+                    time.sleep(35)
+                else:
+                    logger.error("getUpdates помилка: %s", desc)
+                    time.sleep(5)
                 continue
 
             for update in result.get("result", []):

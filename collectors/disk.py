@@ -18,8 +18,9 @@ def collect(config: dict) -> dict:
             free_pct = (usage.free / usage.total) * 100
             used_pct = usage.percent
 
-            # Зберігаємо метрику
-            metric_key = f"disk_{path.replace(':', '').replace('\\', '')}_free_pct"
+            # Зберігаємо метрику (backslash не можна в f-string на Python 3.8)
+            path_key = path.replace(':', '').replace('\\', '')
+            metric_key = f"disk_{path_key}_free_pct"
             save_metric(metric_key, free_pct, {"path": path, "free_gb": round(usage.free / 1e9, 2)})
 
             # Динаміка за годину

@@ -197,15 +197,17 @@ def _stable_alert_key(metrics: dict, config: dict) -> str:
         if not svc.get("is_running"):
             return f"service_down_{svc['name']}"
 
-    crit_pct = float(config.get("DISK_CRITICAL_PERCENT", 10))
-    warn_pct = float(config.get("DISK_WARNING_PERCENT", 20))
+    crit_pct = float(config.get("DISK_CRITICAL_PERCENT", 5))
+    warn_pct = float(config.get("DISK_WARNING_PERCENT", 10))
     for d in metrics.get("disks", []):
         free = d.get("free_pct", 100)
         path = d.get("path", "?").rstrip("\\").replace(":", "")
-        if free < crit_pct:
-            return f"disk_{path}_critical"
         if free < warn_pct:
-            return f"disk_{path}_warning"
+            # Бенд 2%: при кожному зниженні на 2% — новий ключ → новий алерт одразу
+            # Приклад: 9%→b8, 7%→b6, 4%→b4_critical, 2%→b2_critical
+            band = max(0, int(free // 2) * 2)
+            severity = "critical" if free < crit_pct else "warning"
+            return f"disk_{path}_{severity}_b{band}"
 
     cpu_warn = float(config.get("CPU_WARNING_PERCENT", 85))
     ram_warn = float(config.get("RAM_WARNING_PERCENT", 90))
@@ -243,7 +245,7 @@ def _has_anything_notable(metrics: dict, config: dict) -> bool:
         return True
 
     # Диски
-    warn_pct = float(config.get("DISK_WARNING_PERCENT", 20))
+    warn_pct = float(config.get("DISK_WARNING_PERCENT", 10))
     for d in metrics.get("disks", []):
         if d.get("free_pct", 100) < warn_pct:
             return True
@@ -275,51 +277,51 @@ def _fallback_rules(metrics: dict, config: dict, stable_key: str = None) -> Opti
     alerts = []
 
     # Диски
-    warn_pct = float(config.get("DISK_WARNING_PERCENT", 20))
-    crit_pct = float(config.get("DISK_CRITICAL_PERCENT", 10))
+    warn_pct = float(config.get("DISK_WARNING_PERCENT", 10))
+    crit_pct = float(config.get("DISK_CRITICAL_PERCENT", 5))
     for d in metrics.get("disks", []):
         if "free_pct" in d:
             if d["free_pct"] < crit_pct:
-                alerts.append(("critical", f"🔴 Диск {d['path']}: критично мало місця {d['free_pct']}%",
+                alerts.append(("critical", f"Диск {d['path']}: критично мало місця {d['free_pct']}%",
                                ["#critical", "#disk"]))
             elif d["free_pct"] < warn_pct:
-                alerts.append(("warning", f"⚠️ Диск {d['path']}: мало місця {d['free_pct']}%",
+                alerts.append(("warning", f"Диск {d['path']}: мало місця {d['free_pct']}%",
                                ["#warning", "#disk"]))
 
     # Перебір паролів
     for bf in metrics.get("brute_force_alerts", []):
         if not bf["is_known_network"]:
             ip_str = bf["ip"] or "локальний"
-            alerts.append(("critical", f"🔴 Перебір паролів {ip_str}: {bf['count']} спроб",
+            alerts.append(("critical", f"Перебір паролів {ip_str}: {bf['count']} спроб",
                           ["#critical", "#brute_force", "#security"]))
 
     # Нові адміни
     if metrics.get("new_admins"):
-        alerts.append(("critical", "🔴 Новий адміністратор доданий до системи",
+        alerts.append(("critical", "Новий адміністратор доданий до системи",
                       ["#critical", "#security", "#admin"]))
 
     # Зміни файлів
     if metrics.get("changed_files"):
-        alerts.append(("warning", f"⚠️ Змінено критичний файл: {metrics['changed_files'][0]['path']}",
+        alerts.append(("warning", f"Змінено критичний файл: {metrics['changed_files'][0]['path']}",
                       ["#warning", "#security", "#files"]))
 
     # Нові RDP IP
     if metrics.get("new_ip_alerts"):
         ip = metrics["new_ip_alerts"][0]["ip"]
-        alerts.append(("warning", f"⚠️ RDP: підключення з нового IP {ip}",
+        alerts.append(("warning", f"RDP: підключення з нового IP {ip}",
                       ["#warning", "#rdp", "#new_ip"]))
 
     # Сервіси зупинились
     for svc_name in metrics.get("newly_stopped", []):
-        alerts.append(("critical", f"🔴 Сервіс зупинився: {svc_name}",
+        alerts.append(("critical", f"Сервіс зупинився: {svc_name}",
                       ["#critical", "#service"]))
 
     # Бекапи
     if metrics.get("status") == "critical":
-        alerts.append(("critical", f"🔴 Критична проблема з бекапом: {', '.join(metrics.get('issues', []))}",
+        alerts.append(("critical", f"Критична проблема з бекапом: {', '.join(metrics.get('issues', []))}",
                       ["#critical", "#backup"]))
     elif metrics.get("status") == "warning":
-        alerts.append(("warning", f"⚠️ Проблема з бекапом: {', '.join(metrics.get('issues', []))}",
+        alerts.append(("warning", f"Проблема з бекапом: {', '.join(metrics.get('issues', []))}",
                       ["#warning", "#backup"]))
 
     if not alerts:

@@ -169,7 +169,19 @@ def run():
             if decision and decision.get("should_alert"):
                 alert_key = decision.get("alert_key", "generic")
                 severity  = decision.get("severity", "info")
-                if storage.can_send_alert(alert_key, cooldown):
+                tags      = decision.get("tags", [])
+
+                # Диски: окремі cooldown щоб не спамити при стабільно низькому місці.
+                # При погіршенні на 2%+ ключ змінюється → алерт завжди одразу.
+                if "#disk" in tags:
+                    if severity == "critical":
+                        effective_cooldown = int(config.get("DISK_CRITICAL_COOLDOWN_MIN", 60))
+                    else:
+                        effective_cooldown = int(config.get("DISK_WARNING_COOLDOWN_MIN", 360))
+                else:
+                    effective_cooldown = cooldown
+
+                if storage.can_send_alert(alert_key, effective_cooldown):
                     logger.info("Відправляємо алерт: %s (%s)", alert_key, severity)
                     ok = notifier.send_alert(decision, all_metrics, config)
                     if ok:

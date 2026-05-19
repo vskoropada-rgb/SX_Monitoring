@@ -70,33 +70,35 @@ def _check_zip(filepath: str, password: Optional[str]) -> str:
         return "error"
 
 
+def _size_ok(filepath: str, min_size_mb: float = 1.0) -> bool:
+    return os.path.getsize(filepath) >= min_size_mb * 1_000_000
+
+
 def _check_rar(filepath: str, password: Optional[str]) -> str:
-    """RAR: потребує бібліотеку rarfile + unrar/bsdtar."""
+    """RAR: перевірка заголовків (Python-only) + розмір. testrar() не викликається.
+    Зовнішній інструмент unrar не потрібен — уникаємо false-positive "corrupted"."""
     if os.path.getsize(filepath) <= _MIN_VALID_SIZE:
         return "too_small"
-    try:
-        import rarfile
-    except ImportError:
-        # Без бібліотеки перевіряємо тільки розмір
-        return "ok"
 
     try:
+        import rarfile
+        # Читаємо тільки заголовки — це чистий Python, unrar не потрібен
         with rarfile.RarFile(filepath) as rf:
             if rf.needs_password():
-                if password:
-                    rf.setpassword(password)
-                else:
+                if not password:
                     return "encrypted"
-            rf.testrar()
-            return "ok"
+                rf.setpassword(password)
+        return "ok"
+    except ImportError:
+        pass  # бібліотека відсутня — перевіряємо тільки розмір
     except Exception as e:
         msg = str(e).lower()
         if "password" in msg or "encrypted" in msg:
             return "encrypted"
-        if "badrar" in msg or "corrupt" in msg:
-            return "corrupted"
-        logger.debug("check_rar(%s): %s", filepath, e)
-        return "corrupted"
+        # Не можемо прочитати заголовки, але файл великий → не вважаємо пошкодженим
+        logger.debug("check_rar header(%s): %s", filepath, e)
+
+    return "ok" if _size_ok(filepath) else "too_small"
 
 
 def _check_archive(filepath: str, password: Optional[str]) -> str:

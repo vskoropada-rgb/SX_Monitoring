@@ -70,21 +70,22 @@ def collect_brute_force(config: dict) -> dict:
             pass
 
     alerts = []
-    suspicious_ips = []  # всі IP з будь-якими невдалими спробами (для кнопки блокування)
+    suspicious_ips = []  # лише реальні IP (для кнопки блокування)
 
     for ip, users in ip_attempts.items():
-        if ip in ("unknown", "", "-"):
-            continue
         count = len(users)
+        real_ip = ip not in ("unknown", "", "-")
+
         is_known = False
-        try:
-            ip_obj = ipaddress.ip_address(ip)
-            is_known = any(ip_obj in net for net in known_networks)
-        except Exception:
-            pass
+        if real_ip:
+            try:
+                ip_obj = ipaddress.ip_address(ip)
+                is_known = any(ip_obj in net for net in known_networks)
+            except Exception:
+                pass
 
         entry = {
-            "ip": ip,
+            "ip": ip if real_ip else "",
             "count": count,
             "usernames": list(set(users))[:5],
             "is_known_network": is_known,
@@ -93,10 +94,11 @@ def collect_brute_force(config: dict) -> dict:
         if count >= threshold:
             alerts.append(entry)
 
-        if not is_known:
+        # До кнопки блокування — лише реальні зовнішні IP
+        if real_ip and not is_known:
             suspicious_ips.append(entry)
 
-    # Сортуємо за кількістю спроб
+    alerts.sort(key=lambda x: x["count"], reverse=True)
     suspicious_ips.sort(key=lambda x: x["count"], reverse=True)
 
     return {

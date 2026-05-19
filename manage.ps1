@@ -2,6 +2,9 @@
 # Run as Administrator: Right-click -> "Run with PowerShell" (as Admin)
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Bypass перевірки SSL-сертифікатів — потрібно для Windows 2008 R2
+# зі застарілим сховищем кореневих сертифікатів
+try { [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true } } catch {}
 $OutputEncoding = [System.Text.Encoding]::UTF8
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 $ErrorActionPreference = "SilentlyContinue"
@@ -278,6 +281,61 @@ function Test-BackupFolder {
 
 # ─── TLS 1.2 ─────────────────────────────────────────────────
 
+function Test-Tls {
+    Write-Info "Перевірка TLS та інтернет-підключення..."
+
+    # Показуємо доступні в .NET TLS-протоколи
+    try {
+        $protos = [Enum]::GetValues([Net.SecurityProtocolType]) |
+                  Where-Object { $_ -ne 0 } |
+                  ForEach-Object { $_.ToString() }
+        Write-Host "  .NET TLS протоколи: $($protos -join ', ')" -ForegroundColor DarkGray
+    } catch {}
+
+    # Встановлюємо TLS 1.2 + bypass сертифікатів (для 2008 R2)
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    } catch {
+        Write-Err "Не вдалося встановити TLS 1.2: $_"
+        Write-Host "  Потрібен .NET Framework 4.5 або новіший." -ForegroundColor Yellow
+        return $false
+    }
+
+    # Перевіряємо реальне підключення до потрібних ресурсів
+    $checks = @(
+        @{ Name = "python.org";               Url = "https://www.python.org/ftp/python/" },
+        @{ Name = "raw.githubusercontent.com"; Url = "https://raw.githubusercontent.com/" },
+        @{ Name = "api.telegram.org";          Url = "https://api.telegram.org/" }
+    )
+
+    $allOk = $true
+    foreach ($c in $checks) {
+        try {
+            $req          = [Net.HttpWebRequest]::Create($c.Url)
+            $req.Method   = "HEAD"
+            $req.Timeout  = 8000
+            $resp = $req.GetResponse()
+            $resp.Close()
+            Write-Ok "$($c.Name)"
+        } catch {
+            $msg = $_.Exception.Message -replace "`r`n.*",""
+            Write-Err "$($c.Name) — $msg"
+            $allOk = $false
+        }
+    }
+
+    if (-not $allOk) {
+        Write-Host ""
+        Write-Host "  Можливі причини:" -ForegroundColor Yellow
+        Write-Host "  1. TLS 1.2 вимкнений у реєстрі — запустіть Enable-Tls12 і перезавантажте" -ForegroundColor Yellow
+        Write-Host "  2. Брандмауер блокує HTTPS (порт 443)" -ForegroundColor Yellow
+        Write-Host "  3. Немає інтернету на сервері" -ForegroundColor Yellow
+    }
+
+    return $allOk
+}
+
 function Enable-Tls12 {
     Write-Info "Увімкнення TLS 1.2 у реєстрі..."
     $tlsBase = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols"
@@ -329,8 +387,16 @@ function Prepare-Server {
     }
     Write-Host ""
 
-    # TLS 1.2 — критично для Windows 2008 R2 (Telegram, OpenAI, pip)
+    # TLS 1.2: спочатку перевіряємо підключення, потім пишемо реєстр
+    $tlsOk = Test-Tls
+    Write-Host ""
     Enable-Tls12
+    if (-not $tlsOk) {
+        Write-Host ""
+        Write-Host "  УВАГА: інтернет недоступний або TLS не працює." -ForegroundColor Red
+        Write-Host "  Реєстровий ключ TLS 1.2 вже записано — перезавантажте сервер і спробуйте знову." -ForegroundColor Yellow
+        Pause-Return; return
+    }
     Write-Host ""
 
     # Python — перевірка

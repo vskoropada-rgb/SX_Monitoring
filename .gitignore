@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual env
+venv/
+.venv/
+env/
+
+# Local secrets / DB / logs
+.env
+.env.base
+*.db
+*.log
+monitor.log*
+.backup_*/
+
+# IDE
+.vscode/
+.idea/
+*.swp

@@ -1036,6 +1036,18 @@ function Restart-Monitor {
     Get-WmiObject Win32_Process |
         Where-Object { $_.CommandLine -match "main\.py" } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+    # Видаляємо PID-lock щоб новий екземпляр міг стартувати
+    $pidFile = Join-Path $ScriptDir "monitor.pid"
+    if (Test-Path $pidFile) { Remove-Item $pidFile -Force -ErrorAction SilentlyContinue }
+
+    # Чекаємо повного завершення (Windows іноді потребує кілька секунд)
+    Start-Sleep -Seconds 4
+    $still = Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -match "main\.py" }
+    if ($still) {
+        $still | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Seconds 2
+    }
     Write-Ok "Процеси зупинені"
 
     $tasksExist = $false

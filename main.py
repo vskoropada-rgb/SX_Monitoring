@@ -1,6 +1,8 @@
 """
 main.py — єдина точка входу: моніторинг (фоновий потік) + Telegram бот
 """
+import atexit
+import os
 import sys
 import logging
 import threading
@@ -36,6 +38,43 @@ import storage
 from monitor import run as monitor_run
 from bot import run as bot_run
 
+# ─── PID-lock: один екземпляр за раз ─────────────────────────
+
+_PID_FILE = ROOT / "monitor.pid"
+
+
+def _acquire_lock() -> bool:
+    """Повертає True якщо запуск дозволений (інший екземпляр не працює)."""
+    if _PID_FILE.exists():
+        try:
+            old_pid = int(_PID_FILE.read_text().strip())
+            try:
+                import psutil
+                p = psutil.Process(old_pid)
+                if "main" in " ".join(p.cmdline()).lower():
+                    logger.error(
+                        "Інший екземпляр вже запущений (PID %d) — завершення. "
+                        "Якщо це помилка, видаліть %s", old_pid, _PID_FILE
+                    )
+                    return False
+            except Exception:
+                pass  # psutil недоступний або процес вже зупинений
+        except (ValueError, OSError):
+            pass
+    _PID_FILE.write_text(str(os.getpid()))
+    atexit.register(_release_lock)
+    return True
+
+
+def _release_lock() -> None:
+    try:
+        _PID_FILE.unlink()
+    except OSError:
+        pass
+
+
+# ─── Monitor loop ─────────────────────────────────────────────
+
 
 def _monitor_loop(stop_event: threading.Event, interval: int):
     logger.info("Monitor loop started (interval=%ds)", interval)
@@ -49,6 +88,9 @@ def _monitor_loop(stop_event: threading.Event, interval: int):
 
 
 def main():
+    if not _acquire_lock():
+        sys.exit(0)
+
     storage.init_db()
 
     interval = int(_cfg.get("CHECK_INTERVAL_SEC", 60))

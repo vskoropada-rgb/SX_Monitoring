@@ -37,8 +37,19 @@ def send_alert(decision: dict, metrics: dict, config: dict) -> bool:
     if analysis:
         lines.append(analysis)
 
+    # Брутфорс — показуємо IP, юзернейми та регіон
+    is_brute = "#brute_force" in tags_list or "#security" in tags_list
+    if is_brute:
+        all_suspects = metrics.get("brute_force_alerts", []) or metrics.get("suspicious_ips", [])
+        for entry in all_suspects[:3]:
+            ip = entry.get("ip", "")
+            users = ", ".join(entry.get("usernames", [])[:3])
+            geo = _ip_geo(ip) if ip else ""
+            geo_str = f" [{geo}]" if geo else ""
+            lines.append(f"🔑 {ip}{geo_str} — {entry['count']} спроб ({users})")
+
     # Метрики — тільки для не-security алертів, коротко
-    is_security = any(t in tags_list for t in ("#brute_force", "#new_ip", "#admin", "#files"))
+    is_security = any(t in tags_list for t in ("#brute_force", "#new_ip", "#admin", "#files", "#security"))
     if not is_security:
         metrics_block = _format_metrics_block(metrics)
         if metrics_block:
@@ -78,18 +89,38 @@ def _format_metrics_block(metrics: dict) -> str:
     return "\n".join(parts)
 
 
+def _ip_geo(ip: str) -> str:
+    """Повертає 'Країна, місто' або '' якщо недоступно. Timeout 2с."""
+    try:
+        r = requests.get(f"http://ip-api.com/json/{ip}?fields=country,city,status",
+                         timeout=2)
+        d = r.json()
+        if d.get("status") == "success":
+            parts = [d.get("country", ""), d.get("city", "")]
+            return ", ".join(p for p in parts if p)
+    except Exception:
+        pass
+    return ""
+
+
 def _extract_block_ips(decision: dict, metrics: dict) -> List[str]:
-    """Повертає список IP які треба запропонувати заблокувати"""
+    """Повертає список IP які треба запропонувати заблокувати."""
     tags = decision.get("tags", [])
     ips = []
 
-    if "#brute_force" in tags:
+    if "#brute_force" in tags or "#security" in tags:
+        # Спочатку alerts (вище порогу), потім suspicious_ips (будь-які невідомі)
         alerts = metrics.get("brute_force_alerts", [])
         unknown = [a for a in alerts if not a.get("is_known_network")]
         source = unknown if unknown else alerts
-        # Сортуємо за кількістю спроб, max 3 кнопки
         for a in sorted(source, key=lambda x: x["count"], reverse=True)[:3]:
             ips.append(a["ip"])
+
+        # Якщо brute_force_alerts порожній — беремо з suspicious_ips
+        if not ips:
+            for s in metrics.get("suspicious_ips", [])[:3]:
+                if s["ip"] not in ips:
+                    ips.append(s["ip"])
 
     if "#new_ip" in tags or "#rdp" in tags:
         for a in metrics.get("new_ip_alerts", [])[:2]:
@@ -130,7 +161,9 @@ def _build_keyboard(decision: dict, config: dict, metrics: dict = None) -> dict:
         row2.append({"text": "💾 Деталі диску", "callback_data": f"disk_{server_id}"})
 
     # Кнопки блокування — по одній на IP (до 3 штук), по 2 в рядок
-    block_ips = _extract_block_ips(decision, metrics) if ("#brute_force" in tags or "#new_ip" in tags) else []
+    block_ips = _extract_block_ips(decision, metrics) if (
+        "#brute_force" in tags or "#new_ip" in tags or "#security" in tags
+    ) else []
     block_btns = [{"text": f"🚫 {ip}", "callback_data": f"block_confirm_{ip}"} for ip in block_ips]
     for i in range(0, len(block_btns), 2):
         row2 += block_btns[i:i+2]

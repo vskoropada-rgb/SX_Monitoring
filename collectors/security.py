@@ -70,25 +70,38 @@ def collect_brute_force(config: dict) -> dict:
             pass
 
     alerts = []
-    for ip, users in ip_attempts.items():
-        count = len(users)
-        if count >= threshold:
-            is_known = False
-            try:
-                ip_obj = ipaddress.ip_address(ip)
-                is_known = any(ip_obj in net for net in known_networks)
-            except Exception:
-                pass
+    suspicious_ips = []  # всі IP з будь-якими невдалими спробами (для кнопки блокування)
 
-            alerts.append({
-                "ip": ip,
-                "count": count,
-                "usernames": list(set(users)),
-                "is_known_network": is_known,
-            })
+    for ip, users in ip_attempts.items():
+        if ip in ("unknown", "", "-"):
+            continue
+        count = len(users)
+        is_known = False
+        try:
+            ip_obj = ipaddress.ip_address(ip)
+            is_known = any(ip_obj in net for net in known_networks)
+        except Exception:
+            pass
+
+        entry = {
+            "ip": ip,
+            "count": count,
+            "usernames": list(set(users))[:5],
+            "is_known_network": is_known,
+        }
+
+        if count >= threshold:
+            alerts.append(entry)
+
+        if not is_known:
+            suspicious_ips.append(entry)
+
+    # Сортуємо за кількістю спроб
+    suspicious_ips.sort(key=lambda x: x["count"], reverse=True)
 
     return {
         "brute_force_alerts": alerts,
+        "suspicious_ips": suspicious_ips[:5],
         "total_failed_logins": len(events),
         "window_min": window_min,
     }

@@ -74,58 +74,31 @@ def _size_ok(filepath: str, min_size_mb: float = 1.0) -> bool:
     return os.path.getsize(filepath) >= min_size_mb * 1_000_000
 
 
-def _rar_tool_available() -> bool:
-    """Перевіряє чи є unrar або bsdtar у PATH."""
-    import shutil
-    try:
-        import rarfile as _rf
-        tool = getattr(_rf, 'UNRAR_TOOL', 'unrar')
-        alt  = getattr(_rf, 'ALT_TOOL',   'bsdtar')
-    except Exception:
-        tool, alt = 'unrar', 'bsdtar'
-    return bool(shutil.which(tool) or shutil.which(alt))
-
-
 def _check_rar(filepath: str, password: Optional[str]) -> str:
-    """RAR: потребує rarfile + unrar/bsdtar у PATH.
-    Без інструменту — перевірка тільки за розміром (>1 MB = ok)."""
+    """RAR: перевірка заголовків (Python-only) + розмір. testrar() не викликається.
+    Зовнішній інструмент unrar не потрібен — уникаємо false-positive "corrupted"."""
     if os.path.getsize(filepath) <= _MIN_VALID_SIZE:
         return "too_small"
 
     try:
         import rarfile
-    except ImportError:
-        return "ok" if _size_ok(filepath) else "too_small"
-
-    # Якщо unrar/bsdtar відсутній — не намагаємось testrar(), одразу розмір
-    if not _rar_tool_available():
-        logger.debug("check_rar(%s): unrar/bsdtar відсутній, перевірка за розміром", filepath)
-        return "ok" if _size_ok(filepath) else "too_small"
-
-    try:
+        # Читаємо тільки заголовки — це чистий Python, unrar не потрібен
         with rarfile.RarFile(filepath) as rf:
             if rf.needs_password():
-                if password:
-                    rf.setpassword(password)
-                else:
+                if not password:
                     return "encrypted"
-            rf.testrar()
-            return "ok"
+                rf.setpassword(password)
+        return "ok"
+    except ImportError:
+        pass  # бібліотека відсутня — перевіряємо тільки розмір
     except Exception as e:
-        # Явний клас RarCannotExec (інструмент не запустився під час роботи)
-        RarCannotExec = getattr(rarfile, 'RarCannotExec', None)
-        if RarCannotExec and isinstance(e, RarCannotExec):
-            logger.debug("check_rar(%s): RarCannotExec — перевірка за розміром", filepath)
-            return "ok" if _size_ok(filepath) else "too_small"
-
         msg = str(e).lower()
         if "password" in msg or "encrypted" in msg:
             return "encrypted"
-        if "badrar" in msg or "corrupt" in msg:
-            return "corrupted"
-        logger.debug("check_rar(%s): %s", filepath, e)
-        # Невідома помилка + файл великий → не вважаємо пошкодженим
-        return "ok" if _size_ok(filepath) else "corrupted"
+        # Не можемо прочитати заголовки, але файл великий → не вважаємо пошкодженим
+        logger.debug("check_rar header(%s): %s", filepath, e)
+
+    return "ok" if _size_ok(filepath) else "too_small"
 
 
 def _check_archive(filepath: str, password: Optional[str]) -> str:

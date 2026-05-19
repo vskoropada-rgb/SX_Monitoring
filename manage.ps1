@@ -1119,11 +1119,17 @@ function Update-FromGitHub {
         "collectors/software.py", "collectors/schtasks.py"
     )
 
+    # ── TLS + WebClient (Invoke-WebRequest ламається на 2008 R2) ─
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    try { [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true } } catch {}
+    $wc = New-Object System.Net.WebClient
+
     # ── Перевірка доступу ────────────────────────────────────
     Write-Step "Перевірка підключення до GitHub..."
     try {
-        Invoke-WebRequest -Uri "$REPO_RAW/main.py" -Method Head `
-            -UseBasicParsing -ErrorAction Stop | Out-Null
+        $req         = [Net.HttpWebRequest]::Create("$REPO_RAW/main.py")
+        $req.Method  = "HEAD"; $req.Timeout = 8000
+        $resp = $req.GetResponse(); $resp.Close()
         Write-Ok "GitHub доступний"
     } catch {
         Write-Err "Не вдалося підключитися: $_"
@@ -1160,7 +1166,7 @@ function Update-FromGitHub {
         }
 
         try {
-            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+            $wc.DownloadFile($url, $dest)
             # Add UTF-8 BOM to .ps1 files so PowerShell 5.x reads them as UTF-8
             if ($file.EndsWith('.ps1')) {
                 $bytes = [System.IO.File]::ReadAllBytes($dest)

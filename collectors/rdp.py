@@ -1,72 +1,68 @@
 """
-collectors/rdp.py — моніторинг RDP сесій
+collectors/rdp.py — моніторинг RDP сесій + нові IP через Event Log
 """
+from __future__ import annotations
+
+import logging
 import subprocess
-import re
-import win32evtlog
 from datetime import datetime, timedelta
+from typing import List
+
+import actions
 from storage import is_known_ip, register_ip
 
+logger = logging.getLogger(__name__)
 
-def get_active_sessions() -> list:
-    """Отримує активні RDP сесії через qwinsta"""
-    sessions = []
-    try:
-        result = subprocess.run(
-            ["qwinsta"],
-            capture_output=True, text=True, encoding="cp866"
-        )
-        lines = result.stdout.splitlines()
-        for line in lines[1:]:  # Пропускаємо заголовок
-            parts = line.split()
-            if len(parts) >= 3 and parts[0] not in ("console", "services", "rdp-tcp"):
-                try:
-                    session = {
-                        "session_name": parts[0] if not parts[0].isdigit() else "",
-                        "username": parts[1] if len(parts) > 1 else "unknown",
-                        "session_id": parts[2] if len(parts) > 2 else "",
-                        "state": parts[3] if len(parts) > 3 else "",
-                        "type": parts[4] if len(parts) > 4 else "",
-                    }
-                    # Фільтруємо тільки реальні сесії
-                    if session["state"] in ("Active", "Disc", "Activ"):
-                        sessions.append(session)
-                except Exception:
-                    pass
-    except Exception as e:
-        pass
-    return sessions
+
+def get_active_sessions() -> List[dict]:
+    """Активні RDP-сесії через qwinsta (використовує parser з actions.py)."""
+    return actions.get_sessions()
 
 
 def get_session_ips() -> dict:
-    """Отримує IP адреси для сесій через netstat"""
-    session_ips = {}
+    """Мапа IP→True для встановлених підключень на порт 3389 (netstat)."""
+    ips: dict = {}
     try:
         result = subprocess.run(
             ["netstat", "-n"],
-            capture_output=True, text=True, encoding="cp866"
+            capture_output=True, text=True,
+            encoding="cp866", timeout=10,
         )
-        for line in result.stdout.splitlines():
-            # RDP порт 3389
-            if ":3389" in line and "ESTABLISHED" in line:
-                parts = line.split()
-                if len(parts) >= 3:
-                    remote = parts[2]
-                    ip = remote.rsplit(":", 1)[0].strip("[]")
-                    session_ips[ip] = True
-    except Exception:
-        pass
-    return session_ips
+    except Exception as e:
+        logger.error("netstat failed: %s", e)
+        return ips
+
+    for line in result.stdout.splitlines():
+        if ":3389" not in line or "ESTABLISHED" not in line:
+            continue
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        remote = parts[2]
+        ip = remote.rsplit(":", 1)[0].strip("[]")
+        if ip:
+            ips[ip] = True
+    return ips
 
 
-def get_recent_rdp_logins(minutes: int = 60) -> list:
-    """Event ID 4624 — успішні входи по RDP (LogonType=10)"""
-    logins = []
+def get_recent_rdp_logins(minutes: int = 60) -> List[dict]:
+    """Event ID 4624 LogonType=10 — успішні RDP-входи за останні N хвилин."""
+    try:
+        import win32evtlog
+    except ImportError:
+        logger.warning("pywin32 недоступний — RDP логіни пропущено")
+        return []
+
+    logins: List[dict] = []
     try:
         hand = win32evtlog.OpenEventLog(None, "Security")
         flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
         cutoff = datetime.now() - timedelta(minutes=minutes)
+    except Exception as e:
+        logger.error("OpenEventLog failed: %s", e)
+        return logins
 
+    try:
         while True:
             records = win32evtlog.ReadEventLog(hand, flags, 0)
             if not records:
@@ -75,49 +71,58 @@ def get_recent_rdp_logins(minutes: int = 60) -> list:
                 try:
                     event_time = datetime(*rec.TimeGenerated.timetuple()[:6])
                     if event_time < cutoff:
-                        raise StopIteration
+                        return logins  # читали з кінця, далі тільки старіші
+                    if (rec.EventID & 0xFFFF) != 4624:
+                        continue
 
-                    if (rec.EventID & 0xFFFF) == 4624:
-                        strings = rec.StringInserts
-                        if strings and len(strings) > 18:
-                            logon_type = strings[8].strip() if len(strings) > 8 else ""
-                            if logon_type == "10":  # RemoteInteractive = RDP
-                                username = strings[5].strip()
-                                ip = strings[18].strip() if len(strings) > 18 else "unknown"
-                                logins.append({
-                                    "username": username,
-                                    "ip": ip,
-                                    "time": event_time.strftime("%Y-%m-%d %H:%M:%S"),
-                                    "is_new_ip": not is_known_ip(ip),
-                                })
-                                if ip and ip != "-":
-                                    register_ip(ip, username)
-                except StopIteration:
-                    win32evtlog.CloseEventLog(hand)
-                    return logins
-                except Exception:
-                    pass
+                    strings = rec.StringInserts or []
+                    # LogonType — індекс 8 (стандартний layout 4624)
+                    if len(strings) <= 8:
+                        continue
+                    logon_type = (strings[8] or "").strip()
+                    if logon_type != "10":  # 10 = RemoteInteractive (RDP)
+                        continue
 
-        win32evtlog.CloseEventLog(hand)
-    except Exception:
-        pass
+                    username = (strings[5] or "").strip() if len(strings) > 5 else ""
+                    ip = (strings[18] or "").strip() if len(strings) > 18 else "unknown"
+
+                    if not username or not ip:
+                        continue
+
+                    logins.append({
+                        "username": username,
+                        "ip":       ip,
+                        "time":     event_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "is_new_ip": not is_known_ip(ip),
+                    })
+                    if ip not in ("", "-", "unknown"):
+                        register_ip(ip, username)
+                except Exception as e:
+                    logger.debug("Skip event: %s", e)
+    finally:
+        try:
+            win32evtlog.CloseEventLog(hand)
+        except Exception:
+            pass
+
     return logins
 
 
 def collect(config: dict) -> dict:
-    active_sessions = get_active_sessions()
-    session_ips = get_session_ips()
-    recent_logins = get_recent_rdp_logins(
-        minutes=int(config.get("CHECK_INTERVAL_SEC", 60)) // 60 + 2
-    )
+    active = get_active_sessions()
+    ips = get_session_ips()
+    minutes = max(2, int(config.get("CHECK_INTERVAL_SEC", 60)) // 60 + 2)
+    recent = get_recent_rdp_logins(minutes=minutes)
 
-    # Нові IP — тільки невідомі
-    new_ip_alerts = [l for l in recent_logins if l["is_new_ip"] and l["ip"] not in ("", "-", "unknown")]
+    new_ip_alerts = [
+        l for l in recent
+        if l["is_new_ip"] and l["ip"] not in ("", "-", "unknown")
+    ]
 
     return {
-        "active_sessions": active_sessions,
-        "active_ips": list(session_ips.keys()),
-        "recent_logins": recent_logins,
-        "new_ip_alerts": new_ip_alerts,
-        "session_count": len(active_sessions),
+        "active_sessions": active,
+        "active_ips":      list(ips.keys()),
+        "recent_logins":   recent,
+        "new_ip_alerts":   new_ip_alerts,
+        "session_count":   len(active),
     }

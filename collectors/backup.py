@@ -1,37 +1,63 @@
 """
-collectors/backup.py — перевірка бекапів (zip/rar/7z/bak/dt/1cd): цілісність, розклад, тренд розміру
+collectors/backup.py — перевірка бекапів: цілісність, розклад, тренд розміру.
+
+Підтримує zip/rar/7z/bak/dt/1cd. Для RAR потрібен `rarfile` + unrar/bsdtar у PATH.
 """
-import os
+from __future__ import annotations
+
 import glob
-import zipfile
 import logging
+import os
+import zipfile
 from collections import Counter
-from typing import Optional
 from datetime import datetime, timedelta
+from typing import Optional
+
 import storage
 
 logger = logging.getLogger(__name__)
 
 _BACKUP_EXTS = ("*.zip", "*.rar", "*.7z", "*.bak", "*.dt", "*.1cd")
+_MIN_VALID_SIZE = 1024  # байтів — менше вважаємо "too_small"
 
 
-def _check_zip(filepath: str, password: str = None) -> str:
-    """Перевіряє ZIP-архів. Повертає: 'ok' | 'encrypted' | 'corrupted' | 'too_small'"""
-    if os.path.getsize(filepath) <= 1024:
+# ─── Парсинг datetime з SQLite ───────────────────────────────
+
+
+def _parse_db_datetime(s: str) -> datetime:
+    """
+    SQLite зберігає DATETIME як 'YYYY-MM-DD HH:MM:SS' (через пробіл).
+    Python 3.8 fromisoformat() не приймає такий формат — тільки 'YYYY-MM-DDTHH:MM:SS'.
+    Цей хелпер обробляє обидва варіанти.
+    """
+    if not s:
+        raise ValueError("empty datetime string")
+    s = s.strip()
+    if "T" in s:
+        return datetime.fromisoformat(s)
+    # Обрізаємо можливі мікросекунди для strptime
+    if "." in s:
+        s = s.split(".", 1)[0]
+    return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+
+
+# ─── Перевірка цілісності ────────────────────────────────────
+
+
+def _check_zip(filepath: str, password: Optional[str]) -> str:
+    """ZIP: 'ok' | 'encrypted' | 'corrupted' | 'too_small'."""
+    if os.path.getsize(filepath) <= _MIN_VALID_SIZE:
         return "too_small"
     try:
         with zipfile.ZipFile(filepath) as zf:
-            # Перевіряємо прапор шифрування до testzip() —
-            # AES-зашифровані файли кидають BadZipFile замість RuntimeError,
-            # тому покладатись на перехоплення виключень недостатньо.
             is_encrypted = any(info.flag_bits & 0x1 for info in zf.infolist())
             if is_encrypted:
                 if not password:
                     return "encrypted"
                 zf.setpassword(password.encode())
             try:
-                result = zf.testzip()
-                return "ok" if result is None else "corrupted"
+                bad = zf.testzip()
+                return "ok" if bad is None else "corrupted"
             except RuntimeError as e:
                 msg = str(e).lower()
                 if "password" in msg or "encrypted" in msg:
@@ -39,16 +65,22 @@ def _check_zip(filepath: str, password: str = None) -> str:
                 return "corrupted"
     except zipfile.BadZipFile:
         return "corrupted"
-    except Exception:
+    except Exception as e:
+        logger.debug("check_zip(%s): %s", filepath, e)
         return "error"
 
 
-def _check_rar(filepath: str, password: str = None) -> str:
-    """Перевіряє RAR-архів. Потребує бібліотеку rarfile + unrar/bsdtar в PATH."""
-    if os.path.getsize(filepath) <= 1024:
+def _check_rar(filepath: str, password: Optional[str]) -> str:
+    """RAR: потребує бібліотеку rarfile + unrar/bsdtar."""
+    if os.path.getsize(filepath) <= _MIN_VALID_SIZE:
         return "too_small"
     try:
         import rarfile
+    except ImportError:
+        # Без бібліотеки перевіряємо тільки розмір
+        return "ok"
+
+    try:
         with rarfile.RarFile(filepath) as rf:
             if rf.needs_password():
                 if password:
@@ -57,51 +89,63 @@ def _check_rar(filepath: str, password: str = None) -> str:
                     return "encrypted"
             rf.testrar()
             return "ok"
-    except ImportError:
-        return "ok"  # rarfile не встановлено — вважаємо ok, перевірка лише за розміром/віком
     except Exception as e:
         msg = str(e).lower()
-        if "password" in msg or "encrypted" in msg or "badrar" in msg:
+        if "password" in msg or "encrypted" in msg:
             return "encrypted"
+        if "badrar" in msg or "corrupt" in msg:
+            return "corrupted"
+        logger.debug("check_rar(%s): %s", filepath, e)
         return "corrupted"
 
 
-def _check_archive(filepath: str, password: str = None) -> str:
+def _check_archive(filepath: str, password: Optional[str]) -> str:
     ext = os.path.splitext(filepath)[1].lower()
     if ext == ".zip":
         return _check_zip(filepath, password)
     if ext == ".rar":
         return _check_rar(filepath, password)
-    # 7z/bak/dt/1cd — перевіряємо лише розмір
-    return "too_small" if os.path.getsize(filepath) <= 1024 else "ok"
+    # 7z/bak/dt/1cd — без бібліотеки можемо перевірити тільки розмір
+    return "too_small" if os.path.getsize(filepath) <= _MIN_VALID_SIZE else "ok"
+
+
+# ─── Розклад бекапів ─────────────────────────────────────────
 
 
 def _get_expected_backup_hour() -> Optional[int]:
-    """Вираховує типову годину бекапу на основі历史"""
+    """
+    Найчастіша година доби, коли реєструвались нові бекапи (за останні 30 днів).
+    Використовується щоб попередити якщо бекап не з'явився вчасно.
+    """
     history = storage.get_backup_history(days=30)
     if len(history) < 5:
         return None
+
     hours = []
-    for r in history:
+    for row in history:
         try:
-            hours.append(datetime.fromisoformat(r["detected_at"]).hour)
-        except Exception:
-            pass
+            hours.append(_parse_db_datetime(row["detected_at"]).hour)
+        except Exception as e:
+            logger.debug("skip backup row detected_at=%r: %s", row.get("detected_at"), e)
+
     if not hours:
         return None
     return Counter(hours).most_common(1)[0][0]
+
+
+# ─── Основна функція ─────────────────────────────────────────
 
 
 def collect(config: dict) -> dict:
     backup_path   = config.get("BACKUP_PATH", "")
     max_age_hours = int(config.get("BACKUP_MAX_AGE_HOURS", 25))
     min_size_mb   = float(config.get("BACKUP_MIN_SIZE_MB", 10))
-    zip_password  = config.get("BACKUP_ZIP_PASSWORD", "")
+    zip_password  = config.get("BACKUP_ZIP_PASSWORD", "") or None
 
     if not backup_path or not os.path.exists(backup_path):
         return {
             "status": "error",
-            "error": f"Папка бекапів не знайдена: {backup_path}",
+            "error":  f"Папка бекапів не знайдена: {backup_path}",
             "backup_path": backup_path,
         }
 
@@ -121,63 +165,65 @@ def collect(config: dict) -> dict:
                 "schedule_missed": True,
                 "expected_backup_hour": expected_hour,
             }
-        return {"status": "no_files", "backup_path": backup_path,
-                "error": "Файли бекапів не знайдені (zip/rar/7z/bak/dt/1cd)"}
+        return {
+            "status": "no_files",
+            "backup_path": backup_path,
+            "error": "Файли бекапів не знайдені (zip/rar/7z/bak/dt/1cd)",
+        }
 
-    # Найновіший файл
-    latest_file      = max(all_files, key=os.path.getmtime)
-    latest_mtime     = datetime.fromtimestamp(os.path.getmtime(latest_file))
+    # Найновіший
+    latest_file       = max(all_files, key=os.path.getmtime)
+    latest_mtime      = datetime.fromtimestamp(os.path.getmtime(latest_file))
     latest_size_bytes = os.path.getsize(latest_file)
-    latest_size_mb   = round(latest_size_bytes / 1e6, 2)
-    age_hours        = round((datetime.now() - latest_mtime).total_seconds() / 3600, 1)
+    latest_size_mb    = round(latest_size_bytes / 1e6, 2)
+    age_hours         = round((datetime.now() - latest_mtime).total_seconds() / 3600, 1)
 
-    # Реєструємо нові файли в storage + перевіряємо цілісність
+    # Реєструємо нові файли + повторно перевіряємо ті у яких статус "невпевнений"
     latest_integrity = "unknown"
     for f in all_files:
         fname = os.path.basename(f)
         if not storage.is_known_backup(fname):
             size  = os.path.getsize(f)
             mtime = datetime.fromtimestamp(os.path.getmtime(f))
-            integ = _check_archive(f, zip_password or None)
+            integ = _check_archive(f, zip_password)
             storage.record_backup(fname, size, mtime.isoformat(), integ)
-            logger.info("Новий бекап: %s (%sMB) — %s", fname, round(size/1e6,1), integ)
+            logger.info("Новий бекап: %s (%sMB) — %s", fname, round(size/1e6, 1), integ)
             if f == latest_file:
                 latest_integrity = integ
         elif f == latest_file:
             stored = storage.get_backup_integrity(fname)
             if stored in ("corrupted", "error", "unknown"):
-                # Повторна перевірка: файл міг бути перевірений поки ще писався,
-                # або AES-шифрування не було розпізнане (записали як "corrupted")
-                integ = _check_archive(f, zip_password or None)
+                # Можливо файл був перевірений ще під час запису, або AES не розпізнали
+                integ = _check_archive(f, zip_password)
                 if integ != stored:
                     storage.update_backup_integrity(fname, integ)
-                    logger.info("Оновлено цілісність бекапу %s: %s → %s", fname, stored, integ)
+                    logger.info("Оновлено цілісність %s: %s → %s", fname, stored, integ)
                 latest_integrity = integ
             else:
                 latest_integrity = stored or "ok"
 
-    # Останні файли за 48г
+    # Останні файли за 48г для UI
     recent_files = []
+    now = datetime.now()
     for f in all_files:
         mtime = datetime.fromtimestamp(os.path.getmtime(f))
-        if datetime.now() - mtime < timedelta(hours=48):
+        if now - mtime < timedelta(hours=48):
             recent_files.append({
                 "name":      os.path.basename(f),
                 "size_mb":   round(os.path.getsize(f) / 1e6, 2),
-                "age_hours": round((datetime.now() - mtime).total_seconds() / 3600, 1),
+                "age_hours": round((now - mtime).total_seconds() / 3600, 1),
                 "time":      mtime.strftime("%Y-%m-%d %H:%M"),
             })
     recent_files.sort(key=lambda x: x["age_hours"])
 
-    # Розклад: чи пропущено очікуваний бекап?
+    # Аналіз проблем
     schedule_info   = f"~{expected_hour:02d}:00" if expected_hour is not None else None
     schedule_missed = (
         expected_hour is not None
-        and datetime.now().hour >= expected_hour + 3
+        and now.hour >= expected_hour + 3
         and age_hours > 23
     )
 
-    # Список проблем
     issues = []
     status = "ok"
 
@@ -191,15 +237,18 @@ def collect(config: dict) -> dict:
         issues.append("Архів зашифрований (цілісність без пароля не перевірена)")
 
     if latest_size_mb < min_size_mb and latest_integrity not in ("corrupted", "too_small"):
-        status = "warning" if status == "ok" else status
+        if status == "ok":
+            status = "warning"
         issues.append(f"Розмір {latest_size_mb}MB менше мінімуму {min_size_mb}MB")
 
     if age_hours > max_age_hours:
-        status = "warning" if status == "ok" else status
+        if status == "ok":
+            status = "warning"
         issues.append(f"Останній бекап {age_hours}г тому (ліміт {max_age_hours}г)")
 
     if schedule_missed:
-        status = "warning" if status == "ok" else status
+        if status == "ok":
+            status = "warning"
         issues.append(f"Очікувався бекап о {schedule_info}, але немає свіжого")
 
     return {

@@ -122,21 +122,58 @@ def collect_new_admins(config: dict) -> dict:
 
     # Також перевіряємо поточних адмінів при першому запуску
     if not known:
-        try:
-            import subprocess
-            result = subprocess.run(
-                ["net", "localgroup", "Administrators"],
-                capture_output=True, text=True, encoding="cp866"
-            )
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if line and not line.startswith("-") and not line.startswith("Псев") and not line.startswith("Alias"):
-                    if line not in ("", "Команда выполнена успешно.", "The command completed successfully."):
-                        add_known_admin(line)
-        except Exception:
-            pass
+        _bootstrap_known_admins()
 
     return {"new_admins": new_admins}
+
+
+def _bootstrap_known_admins() -> None:
+    """
+    На першому запуску додаємо поточних адмінів у "відомі" щоб уникнути
+    false-positive алертів. Парсимо `net localgroup Administrators` обережно —
+    пропускаємо заголовки, рамки і службові рядки на en/ru локалях.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["net", "localgroup", "Administrators"],
+            capture_output=True, text=True, encoding="cp866", timeout=15,
+        )
+    except Exception as e:
+        # Російська локаль може мати іншу назву групи
+        try:
+            result = subprocess.run(
+                ["net", "localgroup", "Администраторы"],
+                capture_output=True, text=True, encoding="cp866", timeout=15,
+            )
+        except Exception as e2:
+            return
+
+    _SKIP_PREFIXES = (
+        "alias name", "comment", "members",     # en
+        "псевдоним", "комментарий", "члены",    # ru
+    )
+    _SKIP_KEYWORDS = (
+        "completed successfully",   # en
+        "выполнена успешно",        # ru
+    )
+
+    for raw in result.stdout.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("-"):
+            continue
+        low = line.lower()
+        if any(low.startswith(p) for p in _SKIP_PREFIXES):
+            continue
+        if any(kw in low for kw in _SKIP_KEYWORDS):
+            continue
+
+        # Доменні записи: "BUILTIN\Administrators" — беремо лише після останнього '\'
+        if "\\" in line:
+            line = line.rsplit("\\", 1)[-1]
+
+        if line:
+            add_known_admin(line)
 
 
 def collect_file_changes(config: dict) -> dict:

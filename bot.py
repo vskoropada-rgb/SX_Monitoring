@@ -441,7 +441,12 @@ def _dispatch_callback(data: str, message_id: Optional[int]):
 def process_callback(query: dict):
     data        = query.get("data", "")
     callback_id = query.get("id")
-    message_id  = query.get("message", {}).get("message_id")
+    msg         = query.get("message", {})
+    message_id  = msg.get("message_id")
+
+    # Ігноруємо колбеки з чужих топіків — кожен агент обробляє лише свій
+    if TOPIC_ID and str(msg.get("message_thread_id")) != str(TOPIC_ID):
+        return
 
     # Підтверджуємо натискання кнопки ОДРАЗУ — прибирає spinning indicator
     answer_callback(callback_id)
@@ -461,8 +466,13 @@ def process_message(message: dict):
     if not text:
         return
 
+    # Ігноруємо повідомлення з чужих топіків — кожен агент обробляє лише свій
+    msg_thread = message.get("message_thread_id")
+    if TOPIC_ID and str(msg_thread) != str(TOPIC_ID):
+        return
+
     # Відповідаємо у тому самому треді (гілці форуму) де написана команда
-    _reply_thread_id = message.get("message_thread_id")
+    _reply_thread_id = msg_thread
     logger.info(f"Повідомлення: {text} (thread={_reply_thread_id})")
 
     # В групах Telegram команди надходять як /cmd@botname — відкидаємо суфікс

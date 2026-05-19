@@ -43,9 +43,12 @@ def analyze(metrics: dict, config: dict) -> Optional[dict]:
     if not _has_anything_notable(metrics, config):
         return None
 
+    # Детермінований ключ обчислюємо до GPT — GPT-відповідь може варіювати
+    stable_key = _stable_alert_key(metrics, config)
+
     api_key = config.get("OPENAI_API_KEY")
     if not api_key:
-        return _fallback_rules(metrics, config)
+        return _fallback_rules(metrics, config, stable_key)
 
     client = OpenAI(api_key=api_key)
     model = config.get("OPENAI_MODEL", "gpt-4o-mini")
@@ -67,11 +70,14 @@ def analyze(metrics: dict, config: dict) -> Optional[dict]:
         # Очищаємо можливі markdown backticks
         content = content.replace("```json", "").replace("```", "").strip()
         result = json.loads(content)
+        # Завжди перекриваємо GPT-ключ детермінованим — GPT може варіювати ключ
+        # і зламати cooldown-дедуплікацію
+        result["alert_key"] = stable_key
         return result
 
     except Exception as e:
         # Якщо GPT недоступний — fallback на правила
-        return _fallback_rules(metrics, config)
+        return _fallback_rules(metrics, config, stable_key)
 
 
 def _build_context(metrics: dict, config: dict) -> str:
@@ -153,6 +159,68 @@ def _build_context(metrics: dict, config: dict) -> str:
     return "\n".join(lines)
 
 
+def _stable_alert_key(metrics: dict, config: dict) -> str:
+    """Детермінований alert_key з метрик — не залежить від GPT-відповіді."""
+    # Пріоритет: безпека > сервіси > диски > ресурси > бекапи
+    bf = metrics.get("brute_force_alerts", [])
+    if bf:
+        external = [a for a in bf if a.get("ip")]
+        if external:
+            return f"brute_{external[0]['ip']}"
+        return "brute_force_local"
+
+    if metrics.get("new_ip_alerts"):
+        return "rdp_new_ip"
+
+    if metrics.get("new_admins"):
+        return "new_admin"
+
+    if metrics.get("changed_files"):
+        return "file_changed"
+
+    if metrics.get("new_usb_devices"):
+        return "new_usb"
+
+    if metrics.get("new_software"):
+        return "new_software"
+
+    if metrics.get("new_scheduled_tasks"):
+        return "new_schtask"
+
+    newly_stopped = metrics.get("newly_stopped", [])
+    if newly_stopped:
+        return f"service_stopped_{newly_stopped[0]}"
+
+    for svc in metrics.get("services", []):
+        if not svc.get("is_running"):
+            return f"service_down_{svc['name']}"
+
+    crit_pct = float(config.get("DISK_CRITICAL_PERCENT", 10))
+    warn_pct = float(config.get("DISK_WARNING_PERCENT", 20))
+    for d in metrics.get("disks", []):
+        free = d.get("free_pct", 100)
+        path = d.get("path", "?").rstrip("\\").replace(":", "")
+        if free < crit_pct:
+            return f"disk_{path}_critical"
+        if free < warn_pct:
+            return f"disk_{path}_warning"
+
+    cpu_warn = float(config.get("CPU_WARNING_PERCENT", 85))
+    ram_warn = float(config.get("RAM_WARNING_PERCENT", 90))
+    if metrics.get("cpu", {}).get("percent", 0) > cpu_warn:
+        return "cpu_high"
+    if metrics.get("ram", {}).get("percent", 0) > ram_warn:
+        return "ram_high"
+
+    backup_status = metrics.get("status")
+    if backup_status in ("critical", "error"):
+        return "backup_critical"
+    if backup_status == "warning":
+        return "backup_warning"
+
+    return "generic"
+
+
 def _has_anything_notable(metrics: dict, config: dict) -> bool:
     """Швидка перевірка без GPT — чи є взагалі щось варте аналізу"""
 
@@ -200,7 +268,7 @@ def _has_anything_notable(metrics: dict, config: dict) -> bool:
     return False
 
 
-def _fallback_rules(metrics: dict, config: dict) -> Optional[dict]:
+def _fallback_rules(metrics: dict, config: dict, stable_key: str = None) -> Optional[dict]:
     """Резервна логіка якщо GPT недоступний"""
     alerts = []
 
@@ -211,45 +279,46 @@ def _fallback_rules(metrics: dict, config: dict) -> Optional[dict]:
         if "free_pct" in d:
             if d["free_pct"] < crit_pct:
                 alerts.append(("critical", f"🔴 Диск {d['path']}: критично мало місця {d['free_pct']}%",
-                               ["#critical", "#disk"], f"disk_{d['path']}_critical"))
+                               ["#critical", "#disk"]))
             elif d["free_pct"] < warn_pct:
                 alerts.append(("warning", f"⚠️ Диск {d['path']}: мало місця {d['free_pct']}%",
-                               ["#warning", "#disk"], f"disk_{d['path']}_warning"))
+                               ["#warning", "#disk"]))
 
     # Перебір паролів
     for bf in metrics.get("brute_force_alerts", []):
         if not bf["is_known_network"]:
-            alerts.append(("critical", f"🔴 Перебір паролів з {bf['ip']}: {bf['count']} спроб",
-                          ["#critical", "#brute_force", "#security"], f"brute_{bf['ip']}"))
+            ip_str = bf["ip"] or "локальний"
+            alerts.append(("critical", f"🔴 Перебір паролів {ip_str}: {bf['count']} спроб",
+                          ["#critical", "#brute_force", "#security"]))
 
     # Нові адміни
     if metrics.get("new_admins"):
         alerts.append(("critical", "🔴 Новий адміністратор доданий до системи",
-                      ["#critical", "#security", "#admin"], "new_admin"))
+                      ["#critical", "#security", "#admin"]))
 
     # Зміни файлів
     if metrics.get("changed_files"):
         alerts.append(("warning", f"⚠️ Змінено критичний файл: {metrics['changed_files'][0]['path']}",
-                      ["#warning", "#security", "#files"], "file_changed"))
+                      ["#warning", "#security", "#files"]))
 
     # Нові RDP IP
     if metrics.get("new_ip_alerts"):
         ip = metrics["new_ip_alerts"][0]["ip"]
         alerts.append(("warning", f"⚠️ RDP: підключення з нового IP {ip}",
-                      ["#warning", "#rdp", "#new_ip"], f"rdp_new_{ip}"))
+                      ["#warning", "#rdp", "#new_ip"]))
 
     # Сервіси зупинились
     for svc_name in metrics.get("newly_stopped", []):
         alerts.append(("critical", f"🔴 Сервіс зупинився: {svc_name}",
-                      ["#critical", "#service"], f"service_stopped_{svc_name}"))
+                      ["#critical", "#service"]))
 
     # Бекапи
     if metrics.get("status") == "critical":
         alerts.append(("critical", f"🔴 Критична проблема з бекапом: {', '.join(metrics.get('issues', []))}",
-                      ["#critical", "#backup"], "backup_corrupted"))
+                      ["#critical", "#backup"]))
     elif metrics.get("status") == "warning":
         alerts.append(("warning", f"⚠️ Проблема з бекапом: {', '.join(metrics.get('issues', []))}",
-                      ["#warning", "#backup"], "backup_issue"))
+                      ["#warning", "#backup"]))
 
     if not alerts:
         return None
@@ -258,6 +327,9 @@ def _fallback_rules(metrics: dict, config: dict) -> Optional[dict]:
     critical = [a for a in alerts if a[0] == "critical"]
     chosen = critical[0] if critical else alerts[0]
 
+    if stable_key is None:
+        stable_key = _stable_alert_key(metrics, config)
+
     return {
         "should_alert": True,
         "severity": chosen[0],
@@ -265,5 +337,5 @@ def _fallback_rules(metrics: dict, config: dict) -> Optional[dict]:
         "title": chosen[1],
         "analysis": chosen[1],
         "recommendation": "Перевірте сервер",
-        "alert_key": chosen[3],
+        "alert_key": stable_key,
     }

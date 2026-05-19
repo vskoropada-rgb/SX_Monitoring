@@ -45,6 +45,8 @@ def collect_brute_force(config: dict) -> dict:
     """Event ID 4625 — невдалі спроби входу"""
     window_min = int(config.get("BRUTE_FORCE_WINDOW_MIN", 5))
     threshold = int(config.get("BRUTE_FORCE_THRESHOLD", 5))
+    # Окремий поріг для локальних спроб (IP="-"): вони не мережева атака
+    local_threshold = int(config.get("BRUTE_FORCE_LOCAL_THRESHOLD", 50))
     known_networks_str = config.get("KNOWN_IPS", "192.168.1.0/24")
 
     known_networks = []
@@ -56,7 +58,6 @@ def collect_brute_force(config: dict) -> dict:
 
     events = _get_events("Security", [4625], minutes=window_min)
     ip_attempts = defaultdict(list)
-    user_attempts = defaultdict(int)
 
     for rec in events:
         try:
@@ -65,27 +66,38 @@ def collect_brute_force(config: dict) -> dict:
                 ip = strings[19].strip() if strings[19] else "unknown"
                 username = strings[5].strip() if strings[5] else "unknown"
                 ip_attempts[ip].append(username)
-                user_attempts[username] += 1
         except Exception:
             pass
 
     alerts = []
     suspicious_ips = []  # лише реальні IP (для кнопки блокування)
+    local_failed = 0     # кількість локальних невдалих спроб (без IP)
 
     for ip, users in ip_attempts.items():
         count = len(users)
         real_ip = ip not in ("unknown", "", "-")
 
+        if not real_ip:
+            local_failed += count
+            # Локальні логіни — алерт тільки при дуже великій кількості
+            if count >= local_threshold:
+                alerts.append({
+                    "ip": "",
+                    "count": count,
+                    "usernames": list(set(users))[:5],
+                    "is_known_network": True,  # не блокуємо, не зовнішній IP
+                })
+            continue
+
         is_known = False
-        if real_ip:
-            try:
-                ip_obj = ipaddress.ip_address(ip)
-                is_known = any(ip_obj in net for net in known_networks)
-            except Exception:
-                pass
+        try:
+            ip_obj = ipaddress.ip_address(ip)
+            is_known = any(ip_obj in net for net in known_networks)
+        except Exception:
+            pass
 
         entry = {
-            "ip": ip if real_ip else "",
+            "ip": ip,
             "count": count,
             "usernames": list(set(users))[:5],
             "is_known_network": is_known,
@@ -95,7 +107,7 @@ def collect_brute_force(config: dict) -> dict:
             alerts.append(entry)
 
         # До кнопки блокування — лише реальні зовнішні IP
-        if real_ip and not is_known:
+        if not is_known:
             suspicious_ips.append(entry)
 
     alerts.sort(key=lambda x: x["count"], reverse=True)
@@ -105,6 +117,7 @@ def collect_brute_force(config: dict) -> dict:
         "brute_force_alerts": alerts,
         "suspicious_ips": suspicious_ips[:5],
         "total_failed_logins": len(events),
+        "local_failed_logins": local_failed,
         "window_min": window_min,
     }
 

@@ -112,6 +112,18 @@ def init_db():
             data       TEXT NOT NULL,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        -- Накопичені (дайджест) алерти — warning/info до щоденного звіту
+        CREATE TABLE IF NOT EXISTS pending_alerts (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_key  TEXT NOT NULL UNIQUE,
+            title      TEXT NOT NULL,
+            body       TEXT DEFAULT '',
+            severity   TEXT NOT NULL DEFAULT 'warning',
+            added_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            count      INTEGER DEFAULT 1
+        );
         """)
 
 
@@ -370,6 +382,38 @@ def register_task(task_name: str):
         conn.execute(
             "INSERT OR IGNORE INTO known_tasks (task_name) VALUES (?)", (task_name,)
         )
+
+
+# ─── Pending (digest) alerts ─────────────────────────────────
+
+def add_pending_alert(alert_key: str, title: str, body: str, severity: str):
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO pending_alerts (alert_key, title, body, severity)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(alert_key) DO UPDATE SET
+                title=excluded.title,
+                body=excluded.body,
+                updated_at=CURRENT_TIMESTAMP,
+                count=count+1
+        """, (alert_key, title, body or "", severity))
+
+
+def get_pending_alerts() -> list:
+    sev_order = {"critical": 0, "warning": 1, "info": 2}
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT alert_key, title, body, severity, count, added_at "
+            "FROM pending_alerts ORDER BY added_at"
+        ).fetchall()
+    result = [dict(r) for r in rows]
+    result.sort(key=lambda x: sev_order.get(x.get("severity", "info"), 2))
+    return result
+
+
+def clear_pending_alerts():
+    with get_conn() as conn:
+        conn.execute("DELETE FROM pending_alerts")
 
 
 # ─── Metrics cache ───────────────────────────────────────────

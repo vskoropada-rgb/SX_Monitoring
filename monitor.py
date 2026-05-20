@@ -136,9 +136,11 @@ def run():
         if now.hour == report_hour and now.minute < 2:
             cooldown_min = 22 * 60  # раз на 22г, не двічі підряд
             if storage.can_send_alert("daily_report", cooldown_min):
-                notifier.send_daily_report(all_metrics, config)
+                pending = storage.get_pending_alerts()
+                notifier.send_daily_report(all_metrics, config, pending_alerts=pending)
+                storage.clear_pending_alerts()
                 storage.record_alert("daily_report", "report", "info", "daily report sent")
-                logger.info("Щоденний звіт надіслано")
+                logger.info("Щоденний звіт надіслано (%d накопичених алертів)", len(pending))
     except Exception as e:
         logger.error("Помилка щоденного звіту: %s", e)
 
@@ -182,16 +184,32 @@ def run():
                     effective_cooldown = cooldown
 
                 if storage.can_send_alert(alert_key, effective_cooldown):
-                    logger.info("Відправляємо алерт: %s (%s)", alert_key, severity)
-                    ok = notifier.send_alert(decision, all_metrics, config)
-                    if ok:
+                    if severity == "critical":
+                        logger.info("Відправляємо критичний алерт: %s", alert_key)
+                        ok = notifier.send_alert(decision, all_metrics, config)
+                        if ok:
+                            storage.record_alert(
+                                alert_key,
+                                decision.get("tags", [""])[0],
+                                severity,
+                                decision.get("title", ""),
+                            )
+                            logger.info("Критичний алерт відправлений")
+                    else:
+                        # warning/info → накопичуємо до щоденного дайджесту
+                        storage.add_pending_alert(
+                            alert_key,
+                            decision.get("title", "Подія"),
+                            decision.get("analysis", ""),
+                            severity,
+                        )
                         storage.record_alert(
                             alert_key,
                             decision.get("tags", [""])[0],
                             severity,
                             decision.get("title", ""),
                         )
-                        logger.info("Алерт відправлений")
+                        logger.info("Алерт %s (%s) накопичено в дайджест", alert_key, severity)
                 else:
                     logger.info("Алерт %s в кулдауні", alert_key)
             else:

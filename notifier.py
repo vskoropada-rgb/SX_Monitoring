@@ -204,7 +204,7 @@ def _send_message(bot_token: str, group_id: str, topic_id: str, text: str, keybo
         return False
 
 
-def send_daily_report(metrics: dict, config: dict) -> bool:
+def send_daily_report(metrics: dict, config: dict, pending_alerts: list = None) -> bool:
     """Щоденний звіт о заданій годині"""
     company = config.get("COMPANY_NAME", config.get("SERVER_ID", "Server"))
     now     = datetime.now()
@@ -218,14 +218,13 @@ def send_daily_report(metrics: dict, config: dict) -> bool:
     cpu = metrics.get("cpu", {}).get("percent", "?")
     ram = metrics.get("ram", {}).get("percent", "?")
 
-    b_icon = "✅" if metrics.get("status") == "ok" else "⚠️"
+    b_status = metrics.get("status", "")
+    b_icon = "🔴" if b_status == "critical" else "⚠️" if b_status == "warning" else "✅"
     b_line = (
         f"{b_icon} {metrics.get('latest_file', 'н/д')}  "
         f"{metrics.get('latest_size_mb', '?')} MB  "
         f"{metrics.get('latest_age_hours', '?')}г тому"
     )
-    if metrics.get("schedule_info"):
-        b_line += f"  (розклад {metrics['schedule_info']})"
 
     reboot_line = (
         "⚠️ Очікує перезавантаження!" if metrics.get("reboot_required")
@@ -248,6 +247,16 @@ def send_daily_report(metrics: dict, config: dict) -> bool:
 
     if metrics.get("issues"):
         lines += ["", "⚠️ <b>Проблеми:</b>"] + [f"  • {i}" for i in metrics["issues"]]
+
+    if pending_alerts:
+        lines += ["", "📋 <b>Накопичені сповіщення за добу:</b>"]
+        for p in pending_alerts:
+            sev_icon = SEVERITY_ICONS.get(p.get("severity", "warning"), "⚠️")
+            count_str = f" (×{p['count']})" if p.get("count", 1) > 1 else ""
+            lines.append(f"  {sev_icon} {p['title']}{count_str}")
+            body = (p.get("body") or "").strip()
+            if body:
+                lines.append(f"     <i>{body}</i>")
 
     return send_message("\n".join(lines), config)
 

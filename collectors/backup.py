@@ -9,7 +9,6 @@ import glob
 import logging
 import os
 import zipfile
-from collections import Counter
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -111,30 +110,6 @@ def _check_archive(filepath: str, password: Optional[str]) -> str:
     return "too_small" if os.path.getsize(filepath) <= _MIN_VALID_SIZE else "ok"
 
 
-# ─── Розклад бекапів ─────────────────────────────────────────
-
-
-def _get_expected_backup_hour() -> Optional[int]:
-    """
-    Найчастіша година доби, коли реєструвались нові бекапи (за останні 30 днів).
-    Використовується щоб попередити якщо бекап не з'явився вчасно.
-    """
-    history = storage.get_backup_history(days=30)
-    if len(history) < 5:
-        return None
-
-    hours = []
-    for row in history:
-        try:
-            hours.append(_parse_db_datetime(row["detected_at"]).hour)
-        except Exception as e:
-            logger.debug("skip backup row detected_at=%r: %s", row.get("detected_at"), e)
-
-    if not hours:
-        return None
-    return Counter(hours).most_common(1)[0][0]
-
-
 # ─── Основна функція ─────────────────────────────────────────
 
 
@@ -143,6 +118,13 @@ def collect(config: dict) -> dict:
     max_age_hours = int(config.get("BACKUP_MAX_AGE_HOURS", 25))
     min_size_mb   = float(config.get("BACKUP_MIN_SIZE_MB", 10))
     zip_password  = config.get("BACKUP_ZIP_PASSWORD", "") or None
+
+    # Вікно бекапів: WINDOW_START–WINDOW_END, дедлайн = WINDOW_END + GRACE_HOURS
+    win_start     = int(config.get("BACKUP_WINDOW_START", 0))
+    win_end       = int(config.get("BACKUP_WINDOW_END", 5))
+    grace_hours   = int(config.get("BACKUP_GRACE_HOURS", 3))
+    deadline_hour = win_end + grace_hours
+    schedule_info = f"вікно {win_start:02d}:00–{win_end:02d}:00, дедлайн {deadline_hour:02d}:00"
 
     if not backup_path or not os.path.exists(backup_path):
         return {
@@ -155,30 +137,31 @@ def collect(config: dict) -> dict:
     for pattern in _BACKUP_EXTS:
         all_files.extend(glob.glob(os.path.join(backup_path, pattern)))
 
-    expected_hour = _get_expected_backup_hour()
+    now          = datetime.now()
+    today_window = now.replace(hour=win_start, minute=0, second=0, microsecond=0)
 
     if not all_files:
-        now = datetime.now()
-        if expected_hour is not None and now.hour >= expected_hour + 2:
+        schedule_missed = now.hour >= deadline_hour
+        if schedule_missed:
             return {
-                "status": "warning",
-                "issues": [f"Бекапів не знайдено, очікувався о ~{expected_hour:02d}:00"],
-                "backup_path": backup_path,
+                "status":         "warning",
+                "issues":         [f"Бекапів не знайдено ({schedule_info})"],
+                "backup_path":    backup_path,
                 "schedule_missed": True,
-                "expected_backup_hour": expected_hour,
+                "schedule_info":  schedule_info,
             }
         return {
-            "status": "no_files",
+            "status":     "no_files",
             "backup_path": backup_path,
-            "error": "Файли бекапів не знайдені (zip/rar/7z/bak/dt/1cd)",
+            "error":      "Файли бекапів не знайдені (zip/rar/7z/bak/dt/1cd)",
         }
 
-    # Найновіший
+    # Найновіший (mtime файлу — реальний час запису, не час виявлення)
     latest_file       = max(all_files, key=os.path.getmtime)
     latest_mtime      = datetime.fromtimestamp(os.path.getmtime(latest_file))
     latest_size_bytes = os.path.getsize(latest_file)
     latest_size_mb    = round(latest_size_bytes / 1e6, 2)
-    age_hours         = round((datetime.now() - latest_mtime).total_seconds() / 3600, 1)
+    age_hours         = round((now - latest_mtime).total_seconds() / 3600, 1)
 
     # Реєструємо нові файли + повторно перевіряємо ті у яких статус "невпевнений"
     latest_integrity = "unknown"
@@ -195,7 +178,6 @@ def collect(config: dict) -> dict:
         elif f == latest_file:
             stored = storage.get_backup_integrity(fname)
             if stored in ("corrupted", "error", "unknown"):
-                # Можливо файл був перевірений ще під час запису, або AES не розпізнали
                 integ = _check_archive(f, zip_password)
                 if integ != stored:
                     storage.update_backup_integrity(fname, integ)
@@ -206,7 +188,6 @@ def collect(config: dict) -> dict:
 
     # Останні файли за 48г для UI
     recent_files = []
-    now = datetime.now()
     for f in all_files:
         mtime = datetime.fromtimestamp(os.path.getmtime(f))
         if now - mtime < timedelta(hours=48):
@@ -218,13 +199,15 @@ def collect(config: dict) -> dict:
             })
     recent_files.sort(key=lambda x: x["age_hours"])
 
-    # Аналіз проблем
-    schedule_info   = f"~{expected_hour:02d}:00" if expected_hour is not None else None
-    schedule_missed = (
-        expected_hour is not None
-        and now.hour >= expected_hour + 3
-        and age_hours > 23
-    )
+    # Чи є свіжий бекап з поточного вікна?
+    # До дедлайну: вчорашній бекап ще прийнятний (вікно могло не закритись)
+    if now.hour >= deadline_hour:
+        expected_after = today_window
+    else:
+        expected_after = today_window - timedelta(days=1)
+
+    is_fresh        = latest_mtime >= expected_after
+    schedule_missed = now.hour >= deadline_hour and not is_fresh
 
     issues = []
     status = "ok"
@@ -251,21 +234,21 @@ def collect(config: dict) -> dict:
     if schedule_missed:
         if status == "ok":
             status = "warning"
-        issues.append(f"Очікувався бекап о {schedule_info}, але немає свіжого")
+        issues.append(f"Відсутній свіжий бекап ({schedule_info})")
 
     return {
-        "status":               status,
-        "issues":               issues,
-        "latest_file":          os.path.basename(latest_file),
-        "latest_size_mb":       latest_size_mb,
-        "latest_size_bytes":    latest_size_bytes,
-        "latest_age_hours":     age_hours,
-        "latest_time":          latest_mtime.strftime("%Y-%m-%d %H:%M"),
-        "latest_integrity":     latest_integrity,
-        "recent_files":         recent_files[:5],
-        "total_files":          len(all_files),
-        "backup_path":          backup_path,
-        "expected_backup_hour": expected_hour,
-        "schedule_info":        schedule_info,
-        "schedule_missed":      schedule_missed,
+        "status":            status,
+        "issues":            issues,
+        "latest_file":       os.path.basename(latest_file),
+        "latest_size_mb":    latest_size_mb,
+        "latest_size_bytes": latest_size_bytes,
+        "latest_age_hours":  age_hours,
+        "latest_time":       latest_mtime.strftime("%Y-%m-%d %H:%M"),
+        "latest_integrity":  latest_integrity,
+        "recent_files":      recent_files[:5],
+        "total_files":       len(all_files),
+        "backup_path":       backup_path,
+        "schedule_info":     schedule_info,
+        "schedule_missed":   schedule_missed,
+        "is_fresh":          is_fresh,
     }

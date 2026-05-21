@@ -1,7 +1,8 @@
 """
 collectors/backup.py — перевірка бекапів: цілісність, розклад, тренд розміру.
 
-Підтримує zip/rar/7z/bak/dt/1cd. Для RAR потрібен `rarfile` + unrar/bsdtar у PATH.
+За замовчуванням шукає zip/rar/7z. Для RAR потрібен `rarfile` + unrar/bsdtar у PATH.
+Розширити формати можна через BACKUP_EXTENSIONS=zip,rar,7z,bak,dt,1cd у .env
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ import storage
 
 logger = logging.getLogger(__name__)
 
-_BACKUP_EXTS = ("*.zip", "*.rar", "*.7z", "*.bak", "*.dt", "*.1cd")
+_DEFAULT_EXTS = ("zip", "rar", "7z")
 _MIN_VALID_SIZE = 1024  # байтів — менше вважаємо "too_small"
 
 
@@ -133,9 +134,12 @@ def collect(config: dict) -> dict:
             "backup_path": backup_path,
         }
 
+    raw_exts = config.get("BACKUP_EXTENSIONS", "")
+    exts = [e.strip().lstrip("*.") for e in raw_exts.split(",") if e.strip()] or list(_DEFAULT_EXTS)
+
     all_files = []
-    for pattern in _BACKUP_EXTS:
-        all_files.extend(glob.glob(os.path.join(backup_path, pattern)))
+    for ext in exts:
+        all_files.extend(glob.glob(os.path.join(backup_path, f"*.{ext}")))
 
     now          = datetime.now()
     today_window = now.replace(hour=win_start, minute=0, second=0, microsecond=0)

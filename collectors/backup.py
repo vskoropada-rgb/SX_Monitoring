@@ -157,7 +157,10 @@ def collect(config: dict) -> dict:
         }
 
     # Найновіший (mtime файлу — реальний час запису, не час виявлення)
-    latest_file       = max(all_files, key=os.path.getmtime)
+    # Ігноруємо файли ≤ 1KB (маркери, metadata від backup-скриптів),
+    # якщо є хоча б один реальний архів більшого розміру.
+    real_files = [f for f in all_files if os.path.getsize(f) > _MIN_VALID_SIZE]
+    latest_file       = max(real_files if real_files else all_files, key=os.path.getmtime)
     latest_mtime      = datetime.fromtimestamp(os.path.getmtime(latest_file))
     latest_size_bytes = os.path.getsize(latest_file)
     latest_size_mb    = round(latest_size_bytes / 1e6, 2)

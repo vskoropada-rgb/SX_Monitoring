@@ -184,7 +184,8 @@ def collect(config: dict) -> dict:
                 latest_integrity = integ
         elif f == latest_file:
             stored = storage.get_backup_integrity(fname)
-            if stored in ("corrupted", "error", "unknown"):
+            if stored in ("corrupted", "error", "unknown", "too_small"):
+                # too_small може бути записаний поки файл ще писався — перевіряємо знову
                 integ = _check_archive(f, zip_password)
                 if integ != stored:
                     storage.update_backup_integrity(fname, integ)

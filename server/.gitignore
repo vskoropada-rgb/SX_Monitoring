@@ -1,0 +1,6 @@
+.env
+*.pyc
+__pycache__/
+.backup_*/
+*.log
+grafana/dashboards/*.json.bak
